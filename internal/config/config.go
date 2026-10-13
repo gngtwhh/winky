@@ -1,0 +1,73 @@
+package config
+
+import (
+	"encoding/json/v2"
+	"fmt"
+	"os"
+	"path"
+	"path/filepath"
+
+	"github.com/joho/godotenv"
+)
+
+type Config struct {
+	Provider ProviderConfig `json:"provider"`
+	Agent    AgentConfig    `json:"agent"`
+	LogLevel string         `json:"log_level"`
+	Cwd      string         `json:"cwd"`
+}
+
+type ProviderConfig struct {
+	Name      string `json:"name"`    // "openai" | "anthropic" | ...
+	APIKey    string `json:"apiKey"`  // 优先从环境变量读取
+	BaseURL   string `json:"baseUrl"` // 可选，用于兼容端点
+	Model     string `json:"model"`
+	MaxTokens int    `json:"maxTokens,omitempty"`
+}
+
+type AgentConfig struct {
+	AgentDir       string  `json:"agentDir"`
+	MaxTurns       int     `json:"maxTurns,omitempty"`
+	MaxTimeMinutes int     `json:"maxTimeMinutes,omitempty"`
+	Temperature    float64 `json:"temperature,omitempty"`
+}
+
+// Load loads config.json and .env files
+// .env contains secret data such as API_KEY
+func Load(configPath string) (*Config, error) {
+	cfg := DefaultConfig()
+
+	if configPath != "" {
+		if path.Ext(configPath) != ".json" {
+			return nil, fmt.Errorf("config file must end with .json")
+		}
+		if err := loadJSON(configPath, cfg); err != nil {
+			return nil, fmt.Errorf("loading config %s: %w", configPath, err)
+		}
+	}
+
+	dotenvPath := filepath.Join(cfg.Cwd, ".env")
+	_ = godotenv.Load(dotenvPath)
+
+	apiKey := os.Getenv("API_KEY")
+	cfg.Provider.APIKey = apiKey
+
+	if err := cfg.Validate(); err != nil {
+		return nil, fmt.Errorf("validating config: %w", err)
+	}
+	return cfg, nil
+}
+
+func loadJSON(configPath string, cfg *Config) error {
+	data, err := os.ReadFile(configPath)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil
+		}
+		return err
+	}
+	return json.Unmarshal(
+		data, cfg,
+		json.RejectUnknownMembers(true),
+	)
+}
