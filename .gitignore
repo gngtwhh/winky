@@ -1,0 +1,23 @@
+*.exe
+*.exe~
+*.dll
+*.so
+*.dylib
+*.test
+*.out
+
+# Go workspace
+go.work
+go.work.sum
+
+
+/vendor/
+
+# IDE
+.idea/
+.vscode/
+*.swp
+
+.DS_Store
+
+.env
