@@ -6,6 +6,7 @@ import (
 	"winky/internal/llm"
 
 	"github.com/openai/openai-go/v3"
+	"github.com/openai/openai-go/v3/packages/ssestream"
 	"github.com/openai/openai-go/v3/responses"
 	"github.com/openai/openai-go/v3/shared"
 )
@@ -36,7 +37,7 @@ func (rp *ResponsesProtocol) Stream(
 		defer close(ch)
 		defer stream.Close()
 
-		consumeResponseStream(ctx, stream, ch)
+		consumeResponsesStream(ctx, stream, ch)
 	}()
 
 	return ch, nil
@@ -44,6 +45,80 @@ func (rp *ResponsesProtocol) Stream(
 
 func (*ResponsesProtocol) Name() string {
 	return "openai-responses"
+}
+
+func consumeResponsesStream(
+	ctx context.Context,
+	stream *ssestream.Stream[responses.ResponseStreamEventUnion],
+	ch chan<- llm.StreamChunk,
+) {
+	for stream.Next() {
+		select {
+		case <-ctx.Done():
+			return
+		default:
+		}
+
+		event := stream.Current()
+
+		switch e := event.AsAny().(type) {
+		case responses.ResponseTextDeltaEvent:
+			ch <- llm.StreamChunk{Delta: e.Delta}
+		case responses.ResponseFunctionCallArgumentsDeltaEvent:
+			ch <- llm.StreamChunk{
+				ToolCall: &llm.ToolCall{
+					ID:        e.ItemID, /* is this correct? */
+					Arguments: e.Delta,
+				},
+			}
+		case responses.ResponseFunctionCallArgumentsDoneEvent:
+			ch <- llm.StreamChunk{
+				ToolCall: &llm.ToolCall{
+					ID: e.ItemID,
+					// Name:      e.Name,
+					Arguments: e.Arguments,
+				},
+			}
+		case responses.ResponseCompletedEvent:
+			ch <- llm.StreamChunk{
+				FinishReason: "stop",
+				Done:         true,
+			}
+			return
+		case responses.ResponseFailedEvent:
+			ch <- llm.StreamChunk{
+				FinishReason: "error",
+				Done:         true,
+			}
+			return
+		case responses.ResponseIncompleteEvent:
+			ch <- llm.StreamChunk{
+				FinishReason: "length",
+				Done:         true,
+			}
+			return
+		case responses.ResponseErrorEvent:
+			ch <- llm.StreamChunk{
+				FinishReason: "error",
+				Done:         true,
+			}
+			return
+		default:
+			ch <- llm.StreamChunk{
+				FinishReason: "unknown",
+				Delta:        event.Delta,
+			}
+		}
+	}
+
+	if err := stream.Err(); err != nil {
+		ch <- llm.StreamChunk{
+			FinishReason: "error",
+		}
+		return
+	}
+
+	ch <- llm.StreamChunk{Done: true}
 }
 
 func buildResponsesParams(req llm.Request) (responses.ResponseNewParams, error) {
