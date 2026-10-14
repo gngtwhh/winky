@@ -6,6 +6,10 @@ import (
 )
 
 func newClient(cfg Config) *openai.Client {
-	client := openai.NewClient(option.WithAPIKey(cfg.ApiKey))
+	opts := []option.RequestOption{option.WithAPIKey(cfg.ApiKey)}
+	if cfg.BaseURL != "" {
+		opts = append(opts, option.WithBaseURL(cfg.BaseURL))
+	}
+	client := openai.NewClient(opts...)
 	return &client
 }

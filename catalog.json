@@ -1,0 +1,44 @@
+{
+  "gpt-4o": {
+    "provider": "openai",
+    "protocol": "openai-responses",
+    "family": "gpt-4o"
+  },
+  "gpt-4o-mini": {
+    "provider": "openai",
+    "protocol": "openai-responses",
+    "family": "gpt-4o-mini"
+  },
+  "gpt-4.1": {
+    "provider": "openai",
+    "protocol": "openai-responses",
+    "family": "gpt-4.1"
+  },
+  "o3-mini": {
+    "provider": "openai",
+    "protocol": "openai-responses",
+    "family": "o3-mini"
+  },
+  "claude-sonnet-4-20250514": {
+    "provider": "anthropic",
+    "protocol": "anthropic-messages",
+    "family": "claude-sonnet-4"
+  },
+  "claude-opus-4-20250514": {
+    "provider": "anthropic",
+    "protocol": "anthropic-messages",
+    "family": "claude-opus-4"
+  },
+  "deepseek-flash": {
+    "provider": "deepseek",
+    "protocol": "openai-completions",
+    "family": "deepseek-flash",
+    "baseUrl": "https://api.deepseek.com"
+  },
+  "deepseek-v4-pro": {
+    "provider": "deepseek",
+    "protocol": "openai-completions",
+    "family": "deepseek-v4-pro",
+    "baseUrl": "https://api.deepseek.com"
+  }
+}
