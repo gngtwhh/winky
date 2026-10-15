@@ -7,6 +7,7 @@ package agent
 
 import (
 	"context"
+	"fmt"
 	"strings"
 	"time"
 
@@ -20,6 +21,7 @@ type Agent struct {
 	systemPrompt string
 	temperature  float64
 	maxTokens    int
+	events       chan Event
 
 	history []llm.Message
 }
@@ -53,17 +55,26 @@ func New(streamer llm.Streamer, opts ...Option) *Agent {
 	for _, opt := range opts {
 		opt(a)
 	}
+	a.events = make(chan Event, 32)
 	return a
 }
 
-// Turn sends one user message and returns the assistant's full reply,
+// TurnResult is the outcome of one Turn.
+type TurnResult struct {
+	Reasoning string
+	Output    string
+}
+
+// Turn sends one user message and returns the model's reasoning and output,
 // maintaining history across calls so consecutive turns share context.
-func (a *Agent) Turn(ctx context.Context, input string) (string, error) {
-	a.history = append(a.history, llm.Message{
-		Role:      llm.RoleUser,
-		Content:   input,
-		Timestamp: time.Now(),
-	})
+func (a *Agent) Turn(ctx context.Context, input string) (TurnResult, error) {
+	a.history = append(
+		a.history, llm.Message{
+			Role:      llm.RoleUser,
+			Content:   input,
+			Timestamp: time.Now(),
+		},
+	)
 
 	req := llm.Request{
 		Model:        a.model,
@@ -75,29 +86,84 @@ func (a *Agent) Turn(ctx context.Context, input string) (string, error) {
 
 	ch, err := a.streamer.Stream(ctx, req)
 	if err != nil {
-		return "", err
+		a.emit(TurnFailed{Err: err})
+		return TurnResult{}, err
 	}
 
-	// Accumulate text deltas into a full reply. Reasoning and tool-call chunks
-	// are ignored for now; a stream error aborts the turn.
-	var sb strings.Builder
+	// Accumulate the reasoning and output text deltas, forwarding each delta
+	// to the events channel as it arrives.
+	var reasoning strings.Builder
+	var output strings.Builder
+	stopReason := llm.StopReasonUnknown
+	var streamErr error
+
+	var uc []string
+
 	for chunk := range ch {
 		switch c := chunk.(type) {
-		case llm.TextDelta:
-			sb.WriteString(c.Text)
-		case llm.ErrorChunk:
-			return "", c.Err
+		case llm.AgentStart:
+			a.emit(TurnStart{Timestamp: c.Timestamp})
+
+		case llm.ReasoningContentDelta:
+			reasoning.WriteString(c.Delta)
+			a.emit(ReasoningDelta{Text: c.Delta})
+
+		case llm.OutputContentDelta:
+			output.WriteString(c.Delta)
+			a.emit(OutputDelta{Text: c.Delta})
+
+		case llm.AgentEnd:
+			stopReason = c.StopReason
+			streamErr = c.Err
+
+		case llm.UnknownChunk:
+			uc = append(uc, c.Raw)
 		}
 	}
 
-	reply := sb.String()
-	a.history = append(a.history, llm.Message{
-		Role:      llm.RoleAssistant,
-		Content:   reply,
-		Timestamp: time.Now(),
-	})
+	// just for debug
+	// fmt.Println("{\"all\":[" + strings.Join(uc, ",") + "]}")
 
-	return reply, nil
+	result := TurnResult{
+		Reasoning: reasoning.String(),
+		Output:    output.String(),
+	}
+
+	if stopReason != llm.StopReasonDone {
+		if streamErr == nil {
+			streamErr = fmt.Errorf("stream stopped: %s", stopReason)
+		}
+		a.emit(TurnFailed{Err: streamErr})
+		return TurnResult{}, streamErr
+	}
+
+	a.history = append(
+		a.history, llm.Message{
+			Role:      llm.RoleAssistant,
+			Content:   result.Output,
+			Timestamp: time.Now(),
+		},
+	)
+
+	a.emit(
+		TurnEnd{
+			Reasoning: result.Reasoning,
+			Output:    result.Output,
+		},
+	)
+
+	return result, nil
+}
+
+// emit sends one event to the events channel. It blocks until a consumer
+// reads it, so a consumer (currently a placeholder in cmd/agent) must drain
+// the channel during every turn.
+func (a *Agent) emit(e Event) {
+	a.events <- e
+}
+
+func (a *Agent) Events() <-chan Event {
+	return a.events
 }
 
 // History returns a copy of the conversation so far.

@@ -3,6 +3,7 @@ package openai
 import (
 	"context"
 	"fmt"
+	"time"
 	"winky/internal/llm"
 
 	"github.com/openai/openai-go/v3"
@@ -52,7 +53,7 @@ func consumeResponsesStream(
 	stream *ssestream.Stream[responses.ResponseStreamEventUnion],
 	ch chan<- llm.Chunk,
 ) {
-	hasFuncCall := false
+	// hasFuncCall := false
 	for stream.Next() {
 		select {
 		case <-ctx.Done():
@@ -62,65 +63,181 @@ func consumeResponsesStream(
 
 		event := stream.Current()
 
+		type currentItem struct {
+			id       string
+			itemType string
+		}
+		var curItem currentItem
+
 		switch e := event.AsAny().(type) {
-		case responses.ResponseTextDeltaEvent:
-			ch <- llm.TextDelta{Text: e.Delta}
-		case responses.ResponseFunctionCallArgumentsDeltaEvent:
-			if !hasFuncCall {
-				hasFuncCall = true
-				ch <- llm.ToolCallStart{
-					ID: e.ItemID, /* TODO: error, change to CallID */
-				}
-			} else {
-				ch <- llm.ToolCallArgsDelta{
-					ID:        e.ItemID,
-					Arguments: e.Delta,
-				}
-			}
-		case responses.ResponseFunctionCallArgumentsDoneEvent:
-			hasFuncCall = false
-			ch <- llm.ToolCallEnd{
-				ID:        e.ItemID,
-				Arguments: e.Arguments,
-			}
-		case responses.ResponseReasoningTextDeltaEvent:
-			ch <- llm.ReasoningDelta{Text: e.Delta}
-		case responses.ResponseReasoningTextDoneEvent:
+		// AgentStart
+		case responses.ResponseCreatedEvent:
+			ch <- llm.AgentStart{Timestamp: time.Now()}
+		// AgentEnd
 		case responses.ResponseCompletedEvent:
-			ch <- llm.FinishChunk{
-				Reason: "stop",
+			ch <- llm.AgentEnd{
+				Timestamp:  time.Now(),
+				StopReason: llm.StopReasonDone,
 			}
 			return
 		case responses.ResponseFailedEvent:
-			ch <- llm.ErrorChunk{
-				Err: fmt.Errorf("%s", e.RawJSON()),
-			}
-			return
-		case responses.ResponseIncompleteEvent:
-			ch <- llm.ErrorChunk{
-				Err: fmt.Errorf("%s", e.RawJSON()),
+			ch <- llm.AgentEnd{
+				Timestamp:  time.Now(),
+				StopReason: llm.StopReasonFailed,
 			}
 			return
 		case responses.ResponseErrorEvent:
-			ch <- llm.ErrorChunk{
-				Err: fmt.Errorf("response error: code=%q msg=%q", e.Code, e.Message),
+			ch <- llm.AgentEnd{
+				Timestamp:  time.Now(),
+				StopReason: llm.StopReasonError,
+				Err:        fmt.Errorf("errcode=%q,errmsg=%q", e.Code, e.Message),
 			}
 			return
+		case responses.ResponseIncompleteEvent:
+			ch <- llm.AgentEnd{
+				Timestamp:  time.Now(),
+				StopReason: llm.StopReasonIncomplete,
+			}
+			return
+		// Item
+		case responses.ResponseOutputItemAddedEvent:
+			curItem.id = e.Item.ID
+			curItem.itemType = e.Item.Type
+			if e.Item.Type == "reasoning" {
+				ch <- llm.ReasoningItemAdd{
+					ItemID: e.Item.ID,
+				}
+			} else if e.Item.Type == "message" {
+				ch <- llm.OutputItemAdd{
+					ItemID: e.Item.ID,
+				}
+			}
+		case responses.ResponseOutputItemDoneEvent:
+			if e.Item.Type == "reasoning" {
+				ch <- llm.ReasoningItemDone{
+					ItemID: e.Item.ID,
+				}
+			} else if e.Item.Type == "message" {
+				ch <- llm.OutputItemDone{
+					ItemID: e.Item.ID,
+				}
+			}
+		// Content
+		case responses.ResponseContentPartAddedEvent:
+			// TODO: should use first "ResponseReasoningTextDeltaEvent" to record?
+			if curItem.itemType == "reasoning" {
+				ch <- llm.ReasoningContentAdd{
+					ItemID: curItem.id,
+				}
+			} else if curItem.itemType == "message" {
+				ch <- llm.OutputContentAdd{
+					ItemID: curItem.id,
+				}
+			}
+		case responses.ResponseContentPartDoneEvent:
+		// Reasoning
+		case responses.ResponseReasoningTextDeltaEvent:
+			ch <- llm.ReasoningContentDelta{
+				ItemID: e.ItemID,
+				Delta:  e.Delta,
+			}
+		case responses.ResponseReasoningTextDoneEvent:
+			ch <- llm.ReasoningContentDone{
+				ItemID:      e.ItemID,
+				FullContent: e.Text,
+			}
+		// Output
+		case responses.ResponseTextDeltaEvent:
+			ch <- llm.OutputContentDelta{
+				ItemID: e.ItemID,
+				Delta:  e.Delta,
+			}
+		case responses.ResponseTextDoneEvent:
+			ch <- llm.OutputContentDone{
+				ItemID:      e.ItemID,
+				FullContent: e.Text,
+			}
+
+		case responses.ResponseInProgressEvent:
+
+		case responses.ResponseAudioDeltaEvent:
+		case responses.ResponseAudioDoneEvent:
+		case responses.ResponseAudioTranscriptDeltaEvent:
+		case responses.ResponseAudioTranscriptDoneEvent:
+
+		case responses.ResponseCodeInterpreterCallCodeDeltaEvent:
+		case responses.ResponseCodeInterpreterCallCodeDoneEvent:
+		case responses.ResponseCodeInterpreterCallCompletedEvent:
+		case responses.ResponseCodeInterpreterCallInProgressEvent:
+		case responses.ResponseCodeInterpreterCallInterpretingEvent:
+
+		case responses.ResponseCompactionCompactingEvent:
+
+		case responses.ResponseFileSearchCallCompletedEvent:
+		case responses.ResponseFileSearchCallInProgressEvent:
+		case responses.ResponseFileSearchCallSearchingEvent:
+		case responses.ResponseFunctionCallArgumentsDeltaEvent:
+		case responses.ResponseFunctionCallArgumentsDoneEvent:
+		case responses.ResponseShellCallCommandAddedEvent:
+		case responses.ResponseShellCallCommandDeltaEvent:
+		case responses.ResponseShellCallCommandDoneEvent:
+		case responses.ResponseShellCallOutputContentDeltaEvent:
+		case responses.ResponseShellCallOutputContentDoneEvent:
+
+		case responses.ResponseReasoningSummaryPartAddedEvent:
+		case responses.ResponseReasoningSummaryPartDoneEvent:
+		case responses.ResponseReasoningSummaryTextDeltaEvent:
+		case responses.ResponseReasoningSummaryTextDoneEvent:
+
+		case responses.ResponseRefusalDeltaEvent:
+		case responses.ResponseRefusalDoneEvent:
+
+		case responses.ResponseWebSearchCallCompletedEvent:
+		case responses.ResponseWebSearchCallInProgressEvent:
+		case responses.ResponseWebSearchCallSearchingEvent:
+		case responses.ResponseImageGenCallCompletedEvent:
+		case responses.ResponseImageGenCallGeneratingEvent:
+		case responses.ResponseImageGenCallInProgressEvent:
+		case responses.ResponseImageGenCallPartialImageEvent:
+		case responses.ResponseMcpCallArgumentsDeltaEvent:
+		case responses.ResponseMcpCallArgumentsDoneEvent:
+		case responses.ResponseMcpCallCompletedEvent:
+		case responses.ResponseMcpCallFailedEvent:
+		case responses.ResponseMcpCallInProgressEvent:
+		case responses.ResponseMcpListToolsCompletedEvent:
+		case responses.ResponseMcpListToolsFailedEvent:
+		case responses.ResponseMcpListToolsInProgressEvent:
+		case responses.ResponseOutputTextAnnotationAddedEvent:
+		case responses.ResponseQueuedEvent:
+		case responses.ResponseCustomToolCallInputDeltaEvent:
+		case responses.ResponseCustomToolCallInputDoneEvent:
 		default:
-			ch <- llm.UnknownChunk{
-				Raw: event.RawJSON(),
+			ch <- llm.AgentEnd{
+				Timestamp:  time.Now(),
+				StopReason: llm.StopReasonError,
+				Err:        fmt.Errorf("AgentError: unknown response type: %T", e),
 			}
 		}
+		// just for debug
+		// ch <- llm.UnknownChunk{
+		// 	Raw: event.RawJSON(),
+		// }
 	}
 
 	if err := stream.Err(); err != nil {
-		ch <- llm.ErrorChunk{
-			Err: fmt.Errorf("%w", err),
+		ch <- llm.AgentEnd{
+			Timestamp:  time.Now(),
+			StopReason: llm.StopReasonError,
+			Err:        fmt.Errorf("OpenAIStreamError: %w", err),
 		}
 		return
 	}
 
-	ch <- llm.FinishChunk{Reason: "stop"}
+	//
+	ch <- llm.AgentEnd{
+		Timestamp:  time.Now(),
+		StopReason: llm.StopReasonUnknown,
+	}
 }
 
 func buildResponsesParams(req llm.Request) (responses.ResponseNewParams, error) {

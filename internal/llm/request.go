@@ -9,7 +9,7 @@ const (
 	RoleSystem     Role = "system"
 	RoleUser       Role = "user"
 	RoleAssistant  Role = "assistant"
-	RoleToolOutput Role = "tool"
+	RoleToolOutput Role = "tools"
 )
 
 type Role string
@@ -32,8 +32,8 @@ type ToolCall struct {
 type ToolParamUnit struct {
 }
 
-// ToolSpec defines the info of a llm layer tool
-// it is needless to contain tool exec info
+// ToolSpec defines the info of a llm layer tools
+// it is needless to contain tools exec info
 type ToolSpec struct {
 	Name        string
 	Description string

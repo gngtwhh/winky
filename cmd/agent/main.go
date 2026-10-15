@@ -51,6 +51,14 @@ func main() {
 		agent.WithMaxTokens(cfg.Provider.MaxTokens),
 	)
 
+	// TODO: temporary placeholder consumer for the events channel. The real
+	// TUI will consume these events; until then drain them so Turn does not
+	// block once the buffered channel fills up.
+	go func() {
+		for range a.Events() {
+		}
+	}()
+
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
@@ -68,11 +76,14 @@ func main() {
 			break
 		}
 
-		reply, err := a.Turn(ctx, line)
+		res, err := a.Turn(ctx, line)
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "error: %v\n", err)
 		} else {
-			fmt.Printf("agent> %s\n\n", reply)
+			if res.Reasoning != "" {
+				fmt.Printf("reasoning> %s\n", res.Reasoning)
+			}
+			fmt.Printf("agent> %s\n\n", res.Output)
 		}
 		fmt.Print("you> ")
 	}

@@ -31,14 +31,14 @@ func New(m *model.Model, cfg Config) (llm.Streamer, error) {
 			},
 		), nil
 
-	case "openai-completions":
-		return openai.NewCompletions(
-			openai.Config{
-				ApiKey:  cfg.ApiKey,
-				Model:   m.Name,
-				BaseURL: m.BaseURL,
-			},
-		), nil
+		// case "openai-completions":
+		// 	return openai.NewCompletions(
+		// 		openai.Config{
+		// 			ApiKey:  cfg.ApiKey,
+		// 			Model:   m.Name,
+		// 			BaseURL: m.BaseURL,
+		// 		},
+		// 	), nil
 
 		// case "anthropic-messages":
 		// 	return anthropic.NewMessages(
