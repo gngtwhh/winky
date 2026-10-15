@@ -68,11 +68,12 @@ func main() {
 			break
 		}
 
-		reply, err := a.Turn(ctx, line)
+		reply, unknownStr, err := a.Turn(ctx, line)
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "error: %v\n", err)
 		} else {
 			fmt.Printf("agent> %s\n\n", reply)
+			fmt.Printf("unknown log> %s\n\n", unknownStr)
 		}
 		fmt.Print("you> ")
 	}

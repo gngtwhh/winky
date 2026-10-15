@@ -58,12 +58,14 @@ func New(streamer llm.Streamer, opts ...Option) *Agent {
 
 // Turn sends one user message and returns the assistant's full reply,
 // maintaining history across calls so consecutive turns share context.
-func (a *Agent) Turn(ctx context.Context, input string) (string, error) {
-	a.history = append(a.history, llm.Message{
-		Role:      llm.RoleUser,
-		Content:   input,
-		Timestamp: time.Now(),
-	})
+func (a *Agent) Turn(ctx context.Context, input string) (string, string, error) {
+	a.history = append(
+		a.history, llm.Message{
+			Role:      llm.RoleUser,
+			Content:   input,
+			Timestamp: time.Now(),
+		},
+	)
 
 	req := llm.Request{
 		Model:        a.model,
@@ -75,29 +77,37 @@ func (a *Agent) Turn(ctx context.Context, input string) (string, error) {
 
 	ch, err := a.streamer.Stream(ctx, req)
 	if err != nil {
-		return "", err
+		return "", "", err
 	}
 
 	// Accumulate text deltas into a full reply. Reasoning and tool-call chunks
 	// are ignored for now; a stream error aborts the turn.
 	var sb strings.Builder
+	var unknownBuffer []string
 	for chunk := range ch {
 		switch c := chunk.(type) {
 		case llm.TextDelta:
 			sb.WriteString(c.Text)
 		case llm.ErrorChunk:
-			return "", c.Err
+			return "", "", c.Err
+		case llm.UnknownChunk:
+			// TODO: add logger
+			unknownBuffer = append(unknownBuffer, c.Raw)
 		}
 	}
 
 	reply := sb.String()
-	a.history = append(a.history, llm.Message{
-		Role:      llm.RoleAssistant,
-		Content:   reply,
-		Timestamp: time.Now(),
-	})
+	a.history = append(
+		a.history, llm.Message{
+			Role:      llm.RoleAssistant,
+			Content:   reply,
+			Timestamp: time.Now(),
+		},
+	)
 
-	return reply, nil
+	return reply,
+		"{\"unknown\": [" + strings.Join(unknownBuffer, ",") + "]}",
+		nil
 }
 
 // History returns a copy of the conversation so far.
