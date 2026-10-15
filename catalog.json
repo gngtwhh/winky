@@ -31,13 +31,13 @@
   },
   "deepseek-flash": {
     "provider": "deepseek",
-    "protocol": "openai-completions",
+    "protocol": "openai-responses",
     "family": "deepseek-flash",
     "baseUrl": "https://api.deepseek.com"
   },
   "deepseek-v4-pro": {
     "provider": "deepseek",
-    "protocol": "openai-completions",
+    "protocol": "openai-responses",
     "family": "deepseek-v4-pro",
     "baseUrl": "https://api.deepseek.com"
   }

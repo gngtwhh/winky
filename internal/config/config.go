@@ -18,9 +18,9 @@ type Config struct {
 }
 
 type ProviderConfig struct {
-	Name      string `json:"name"`    // "openai" | "anthropic" | ...
-	APIKey    string `json:"apiKey"`  // 优先从环境变量读取
-	BaseURL   string `json:"baseUrl"` // 可选，用于兼容端点
+	Name      string `json:"name"` // "openai" | "anthropic" | "deepseek" ...
+	APIKey    string `json:"apiKey"`
+	BaseURL   string `json:"baseUrl"`
 	Model     string `json:"model"`
 	MaxTokens int    `json:"maxTokens,omitempty"`
 }

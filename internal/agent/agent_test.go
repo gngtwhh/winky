@@ -13,18 +13,18 @@ type fakeStreamer struct {
 	calls   []llm.Request
 }
 
-func (f *fakeStreamer) Stream(_ context.Context, req llm.Request) (<-chan llm.StreamChunk, error) {
+func (f *fakeStreamer) Stream(_ context.Context, req llm.Request) (<-chan llm.Chunk, error) {
 	f.calls = append(f.calls, req)
 	reply := f.replies[0]
 	f.replies = f.replies[1:]
 
-	ch := make(chan llm.StreamChunk, len(reply)+1)
+	ch := make(chan llm.Chunk, len(reply)+1)
 	go func() {
 		defer close(ch)
 		for _, r := range reply {
-			ch <- llm.StreamChunk{Delta: string(r)}
+			ch <- llm.TextDelta{Text: string(r)}
 		}
-		ch <- llm.StreamChunk{Done: true}
+		ch <- llm.FinishChunk{Reason: "stop"}
 	}()
 	return ch, nil
 }

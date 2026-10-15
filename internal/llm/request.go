@@ -1,9 +1,15 @@
-// Package llm defines types: Message, Role
 package llm
 
 import (
 	"context"
 	"time"
+)
+
+const (
+	RoleSystem     Role = "system"
+	RoleUser       Role = "user"
+	RoleAssistant  Role = "assistant"
+	RoleToolOutput Role = "tool"
 )
 
 type Role string
@@ -26,6 +32,8 @@ type ToolCall struct {
 type ToolParamUnit struct {
 }
 
+// ToolSpec defines the info of a llm layer tool
+// it is needless to contain tool exec info
 type ToolSpec struct {
 	Name        string
 	Description string
@@ -37,14 +45,6 @@ type TokenUsage struct {
 	PromptTokens     int
 	CompletionTokens int
 	TotalTokens      int
-}
-
-type StreamChunk struct {
-	Delta        string
-	ToolCall     *ToolCall
-	Usage        *TokenUsage
-	FinishReason string
-	Done         bool
 }
 
 // Request is a complete request record for an LLM call,
@@ -59,13 +59,6 @@ type Request struct {
 }
 
 type Streamer interface {
-	Stream(ctx context.Context, req Request) (<-chan StreamChunk, error)
+	Stream(ctx context.Context, req Request) (<-chan Chunk, error)
 	Name() string
 }
-
-const (
-	RoleSystem     Role = "system"
-	RoleUser       Role = "user"
-	RoleAssistant  Role = "assistant"
-	RoleToolOutput Role = "tool"
-)

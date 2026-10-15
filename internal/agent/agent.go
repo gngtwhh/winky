@@ -78,11 +78,15 @@ func (a *Agent) Turn(ctx context.Context, input string) (string, error) {
 		return "", err
 	}
 
-	// Accumulate text deltas into a full reply. Tool calls are ignored for now.
+	// Accumulate text deltas into a full reply. Reasoning and tool-call chunks
+	// are ignored for now; a stream error aborts the turn.
 	var sb strings.Builder
 	for chunk := range ch {
-		if chunk.Delta != "" {
-			sb.WriteString(chunk.Delta)
+		switch c := chunk.(type) {
+		case llm.TextDelta:
+			sb.WriteString(c.Text)
+		case llm.ErrorChunk:
+			return "", c.Err
 		}
 	}
 
