@@ -7,8 +7,7 @@ import (
 	tea "charm.land/bubbletea/v2"
 )
 
-// tickInterval coalesces streamed deltas into a bounded number of re-renders
-// per second, and advances the spinner at the same time.
+// tickInterval coalesces streamed deltas into a bounded number of re-renders.
 const tickInterval = 80 * time.Millisecond
 
 // startPump launches the single goroutine that owns agent.Events(). The agent
@@ -21,6 +20,12 @@ const tickInterval = 80 * time.Millisecond
 func startPump(ctx context.Context, ag Agent, out chan<- AgentEvent, done chan<- struct{}) {
 	go func() {
 		defer close(done)
+
+		if ag == nil {
+			// Running without an agent is allowed (sends are rejected with a
+			// notice), so the pump must simply stop instead of panicking.
+			return
+		}
 
 		src := ag.Events()
 		for {
@@ -67,9 +72,9 @@ func doTurn(ctx context.Context, ag Agent, id int, input string) tea.Cmd {
 	}
 }
 
-// tickCmd drives the spinner and the deferred rebuild while streaming.
+// tickCmd drives the deferred rebuild while streaming.
 func tickCmd(id int) tea.Cmd {
-	return tea.Tick(tickInterval, func(t time.Time) tea.Msg {
-		return tickMsg{At: t, ID: id}
+	return tea.Tick(tickInterval, func(time.Time) tea.Msg {
+		return tickMsg{ID: id}
 	})
 }

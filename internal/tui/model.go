@@ -9,6 +9,7 @@ import (
 	"charm.land/bubbles/v2/textarea"
 	"charm.land/bubbles/v2/viewport"
 	tea "charm.land/bubbletea/v2"
+	"charm.land/lipgloss/v2"
 )
 
 // Chrome around the scrollback viewport.
@@ -66,7 +67,6 @@ type model struct {
 
 	// Session view state (in memory only for now).
 	history         []card
-	lineOwner       []int  // viewport content line -> history index
 	hints           []hint // clickable lines (toggling a reasoning card)
 	follow          bool   // autoscroll while streaming
 	dirty           bool   // deltas pending a coalesced rebuild
@@ -96,6 +96,14 @@ func newModel(ag Agent, st Styles, label string, expandReasoning bool) model {
 	ta.MinHeight = minInputHeight
 	ta.MaxHeight = maxInputHeight
 	ta.DynamicHeight = true
+
+	// The default placeholder foreground (ANSI 240) is nearly invisible
+	// against the cursor-line background the textarea paints under empty
+	// input. Brighten it to a readable gray so the hint stays legible.
+	tst := ta.Styles()
+	tst.Focused.Placeholder = lipgloss.NewStyle().Foreground(lipgloss.Color("245"))
+	tst.Blurred.Placeholder = lipgloss.NewStyle().Foreground(lipgloss.Color("245"))
+	ta.SetStyles(tst)
 
 	// enter must send the message, so drop it from the textarea's newline
 	// bindings and keep the explicit ones (ctrl+j / ctrl+m / ctrl+enter).

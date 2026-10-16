@@ -23,8 +23,7 @@ type turnResult struct {
 	Duration time.Duration
 }
 
-// tickMsg drives the spinner and the coalesced re-render of streamed deltas.
+// tickMsg requests a coalesced re-render of streamed deltas.
 type tickMsg struct {
-	At time.Time
 	ID int
 }

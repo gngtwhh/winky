@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"charm.land/bubbles/v2/key"
+	"charm.land/bubbles/v2/spinner"
 	tea "charm.land/bubbletea/v2"
 
 	"winky/internal/agent"
@@ -42,18 +43,24 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return next, cmd
 
 	case tickMsg:
-		// The spinner re-arms itself through its own TickMsg, so a tick only
-		// has to flush pending deltas and advance the spinner.
-		var cmds []tea.Cmd
-		if m.streaming {
-			var cmd tea.Cmd
-			m.sp, cmd = m.sp.Update(msg)
-			cmds = append(cmds, cmd, tickCmd(msg.ID))
-		}
+		// The rebuild tick only flushes pending deltas; the spinner advances
+		// through its own spinner.TickMsg below.
 		if m.dirty {
 			m.rebuild()
 		}
-		return m, tea.Batch(cmds...)
+		if m.streaming {
+			return m, tickCmd(msg.ID)
+		}
+		return m, nil
+
+	case spinner.TickMsg:
+		var cmd tea.Cmd
+		m.sp, cmd = m.sp.Update(msg)
+		if !m.streaming {
+			// The turn settled while a tick was in flight; do not re-arm.
+			return m, nil
+		}
+		return m, cmd
 
 	case tea.KeyPressMsg:
 		return m.handleKey(msg)
@@ -68,18 +75,11 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, cmd
 	}
 
-	// Spinner frames and anything else the widgets care about.
-	var cmds []tea.Cmd
-	if m.streaming {
-		var cmd tea.Cmd
-		m.sp, cmd = m.sp.Update(msg)
-		cmds = append(cmds, cmd)
-	}
+	// Everything else belongs to the widgets.
 	var cmd tea.Cmd
 	m.input, cmd = m.input.Update(msg)
-	cmds = append(cmds, cmd)
 	m.relayoutIfNeeded()
-	return m, tea.Batch(cmds...)
+	return m, cmd
 }
 
 func (m model) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
@@ -268,13 +268,21 @@ func (m model) handleTurnResult(res turnResult) (tea.Model, tea.Cmd) {
 	}
 
 	m.turnCanc = nil
+	// The wall-clock duration is only known once the turn command returns, and
+	// that can happen after TurnEnd has already settled the cards.
+	if c := m.lastCard(cardAssistant); c != nil {
+		c.Duration = res.Duration
+	}
+
 	if !m.streaming {
 		// TurnEnd already settled this turn. Errors normally arrive through
 		// TurnFailed, so only reconcile when the stream said nothing.
 		if res.Err != nil && m.err == nil {
 			m.err = res.Err
 			m.appendCard(card{Kind: cardError, Text: res.Err.Error(), At: time.Now()})
+			return m, nil // appendCard rebuilt the view
 		}
+		m.rebuild() // reflect the duration recorded above
 		return m, nil
 	}
 
@@ -335,5 +343,5 @@ func (m model) submit() (tea.Model, tea.Cmd) {
 	m.rebuild()
 	m.relayoutIfNeeded()
 
-	return m, doTurn(turnCtx, m.ag, m.turn, text)
+	return m, tea.Batch(doTurn(turnCtx, m.ag, m.turn, text), m.sp.Tick)
 }

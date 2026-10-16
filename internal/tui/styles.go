@@ -4,9 +4,7 @@ import (
 	"charm.land/lipgloss/v2"
 )
 
-// Styles holds every lipgloss style used by the TUI. It is created once in New
-// and passed to the model by value, so no package-level mutable state leaks
-// between programs.
+// Styles holds every lipgloss style used by the TUI.
 type Styles struct {
 	Header    lipgloss.Style
 	Status    lipgloss.Style

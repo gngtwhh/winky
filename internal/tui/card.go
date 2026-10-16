@@ -16,16 +16,14 @@ const (
 	cardNotice
 )
 
-// card is one history entry. Cards are appended once and never reordered;
-// rebuild only re-renders them, which keeps the streaming path cheap for a
-// reasonable number of turns.
+// card is one history entry. Cards are appended once and never reordered.
 type card struct {
 	Kind     cardKind
 	Text     string
 	At       time.Time
-	Duration time.Duration
-	Live     bool // still being streamed into
-	Expanded bool // only meaningful for cardReasoning
+	Duration time.Duration // assistant card only: wall-clock time of the turn
+	Live     bool          // still being streamed into
+	Expanded bool          // only meaningful for cardReasoning
 }
 
 // cardLine is one rendered line plus whether it carries the card's label.
@@ -78,12 +76,10 @@ func (k cardKind) label() string {
 	}
 }
 
-// lines renders the card into labelled lines. The caller supplies line-based
-// styling, so a card can never emit a half-open escape sequence. The returned
-// final element is a blank separator line, which makes the card format
-// self-contained; rebuild drops the last one so the viewport does not end on a
-// dangling gap.
-func (c card) lines() []cardLine {
+// lines renders the card into labelled, width-wrapped lines. Styling is applied
+// by the caller, so a card never emits a half-open escape sequence. The last
+// element is a blank separator that rebuild drops.
+func (c card) lines(width int) []cardLine {
 	out := make([]cardLine, 0, 8)
 	out = append(out, cardLine{text: c.labelText(), label: true})
 
@@ -91,7 +87,12 @@ func (c card) lines() []cardLine {
 	if c.Kind == cardReasoning && !c.Live && !c.Expanded {
 		body = collapseHint(c.Text)
 	}
-	bodyLines := splitLines(body)
+	// The body is indented by two columns, so wrap to width-2.
+	bodyWidth := width - 2
+	if bodyWidth < 1 {
+		bodyWidth = 1
+	}
+	bodyLines := wrapText(body, bodyWidth)
 	if len(bodyLines) == 0 {
 		bodyLines = []string{""}
 	}
@@ -123,20 +124,17 @@ func collapseHint(text string) string {
 }
 
 // rebuild re-renders every card into the viewport and records which content
-// line belongs to which card, so clicks can be mapped back to a card.
+// line carries a clickable reasoning label.
 func (m *model) rebuild() {
 	var (
 		lines   []string
-		owners  []int
 		hintIdx []hint
 	)
 	for i, c := range m.history {
 		if i > 0 && len(lines) > 0 {
-			// Separate consecutive cards by exactly one blank line.
-			lines = append(lines, "")
-			owners = append(owners, owners[len(owners)-1])
+			lines = append(lines, "") // one blank line between cards
 		}
-		for _, l := range c.lines() {
+		for _, l := range c.lines(m.vp.Width()) {
 			if l.label {
 				lines = append(lines, m.style.head(c.Kind).Render(l.text))
 				if c.Kind == cardReasoning {
@@ -145,14 +143,10 @@ func (m *model) rebuild() {
 			} else {
 				lines = append(lines, m.style.body(c.Kind).Render(l.text))
 			}
-			owners = append(owners, i)
 		}
-		// Drop the trailing separator; the next card's loop adds it back.
-		lines = lines[:len(lines)-1]
-		owners = owners[:len(owners)-1]
+		lines = lines[:len(lines)-1] // drop the trailing separator
 	}
 
-	m.lineOwner = owners
 	m.hints = hintIdx
 	m.vp.SetContent(strings.Join(lines, "\n"))
 	m.dirty = false
@@ -168,16 +162,20 @@ func (m *model) appendCard(c card) {
 	m.rebuild()
 }
 
+// lastCard returns the trailing card of the given kind, live or not.
+func (m *model) lastCard(k cardKind) *card {
+	for i := len(m.history) - 1; i >= 0; i-- {
+		if m.history[i].Kind == k {
+			return &m.history[i]
+		}
+	}
+	return nil
+}
+
 // liveCard returns the trailing card of the given kind if it is still live.
 func (m *model) liveCard(k cardKind) *card {
-	for i := len(m.history) - 1; i >= 0; i-- {
-		if m.history[i].Kind != k {
-			continue
-		}
-		if !m.history[i].Live {
-			return nil
-		}
-		return &m.history[i]
+	if c := m.lastCard(k); c != nil && c.Live {
+		return c
 	}
 	return nil
 }

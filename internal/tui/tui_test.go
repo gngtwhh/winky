@@ -8,7 +8,9 @@ import (
 	"testing"
 	"time"
 
+	"charm.land/bubbles/v2/spinner"
 	tea "charm.land/bubbletea/v2"
+	"charm.land/lipgloss/v2"
 
 	"winky/internal/agent"
 )
@@ -247,9 +249,25 @@ func TestEnterSendsAndCtrlJInsertsNewline(t *testing.T) {
 	}
 
 	// The command must carry this turn's id so a stale result can be dropped.
-	res, ok := cmd().(turnResult)
+	// Submit returns a batch (turn + spinner kickoff); find the turn command.
+	batch, ok := cmd().(tea.BatchMsg)
 	if !ok {
-		t.Fatalf("turn command returned %T, want turnResult", cmd())
+		t.Fatalf("turn command returned %T, want tea.BatchMsg", cmd())
+	}
+	var res turnResult
+	found := false
+	for _, c := range batch {
+		if c == nil {
+			continue
+		}
+		if tr, ok := c().(turnResult); ok {
+			res = tr
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Fatal("batch did not contain the turn command")
 	}
 	if res.TurnID != m.turn {
 		t.Fatalf("turn result id = %d, want %d", res.TurnID, m.turn)
@@ -301,4 +319,81 @@ func TestViewFitsWidth(t *testing.T) {
 
 func keyPress(code rune, mod tea.KeyMod) tea.KeyPressMsg {
 	return tea.KeyPressMsg(tea.Key{Code: code, Mod: mod})
+}
+
+// The placeholder hint must not use the default near-invisible foreground,
+// which gets swallowed by the cursor-line background under empty input.
+func TestInputPlaceholderIsReadable(t *testing.T) {
+	m := newTestModel(t, newFakeAgent())
+	got := m.input.Styles().Focused.Placeholder.GetForeground()
+	want := lipgloss.Color("245")
+	if got != want {
+		t.Fatalf("placeholder foreground = %v, want %v", got, want)
+	}
+}
+
+// The spinner must actually rotate: submit starts it, and each spinner.TickMsg
+// advances the rendered frame and re-arms the timer.
+func TestSpinnerRotates(t *testing.T) {
+	m := newTestModel(t, newFakeAgent())
+	m.input.SetValue("hi")
+
+	next, cmd := m.Update(keyPress(tea.KeyEnter, 0))
+	m = next.(model)
+	if !m.streaming {
+		t.Fatal("submit did not enter the streaming state")
+	}
+
+	// Submit must kick off the spinner with a command that resolves to a
+	// spinner.TickMsg.
+	batch, ok := cmd().(tea.BatchMsg)
+	if !ok {
+		t.Fatalf("submit command = %T, want tea.BatchMsg", cmd())
+	}
+	sawTick := false
+	for _, c := range batch {
+		if c == nil {
+			continue
+		}
+		if _, ok := c().(spinner.TickMsg); ok {
+			sawTick = true
+		}
+	}
+	if !sawTick {
+		t.Fatal("submit did not start the spinner")
+	}
+
+	// A spinner tick must advance the rendered frame and re-arm the timer.
+	before := m.sp.View()
+	next, cmd = m.Update(spinner.TickMsg{ID: m.sp.ID()})
+	m = next.(model)
+	if m.sp.View() == before {
+		t.Fatalf("spinner frame did not advance (still %q)", before)
+	}
+	if cmd == nil {
+		t.Fatal("spinner tick did not re-arm")
+	}
+}
+
+// The assistant card must show the turn's wall-clock duration once it settles,
+// even though the duration only arrives with the command result after TurnEnd.
+func TestAssistantCardShowsTurnDuration(t *testing.T) {
+	m := newTestModel(t, newFakeAgent())
+	m = feed(t, m, AgentEvent{Event: agent.TurnStart{Timestamp: time.Now()}})
+	m = feed(t, m, AgentEvent{Event: agent.TurnEnd{Reasoning: "r", Output: "hi"}})
+
+	next, _ := m.Update(turnResult{
+		TurnID:   m.turn,
+		Result:   agent.TurnResult{Reasoning: "r", Output: "hi"},
+		Duration: 1500 * time.Millisecond,
+	})
+	m = next.(model)
+
+	c := cardAt(t, m, cardAssistant)
+	if c.Duration != 1500*time.Millisecond {
+		t.Fatalf("assistant duration = %v, want 1.5s", c.Duration)
+	}
+	if label := c.labelText(); !strings.Contains(label, "1.5s") {
+		t.Fatalf("assistant label = %q, want it to contain %q", label, "1.5s")
+	}
 }

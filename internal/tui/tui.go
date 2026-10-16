@@ -79,9 +79,6 @@ func New(ag Agent, opts ...Option) *Tui {
 	return t
 }
 
-// Model exposes a copy of the current model, for tests.
-func (t *Tui) Model() tea.Model { return t.m }
-
 // Run starts the event pump and blocks until the user quits or ctx is
 // cancelled. A context passed through tea.WithContext is the parent of the one
 // used here, so cancelling it also unblocks any in-flight turn.

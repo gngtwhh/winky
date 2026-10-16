@@ -61,6 +61,10 @@ func (m model) statusView() string {
 	if m.turn > 0 {
 		left = fmt.Sprintf("%s · 第 %d 轮", left, m.turn)
 	}
+	if !m.atBottom() {
+		// The user has scrolled up; there is more history below the fold.
+		left = "↑ " + left
+	}
 
 	return m.style.Status.Render(pair(left, hint, max(minViewportWidth, m.width)))
 }
@@ -76,8 +80,8 @@ func pair(left, right string, width int) string {
 		rw = 0
 	}
 	gap := width - lw - rw
-	if gap < 1 {
-		gap = 1
+	if gap < 0 {
+		gap = 0
 	}
 	return left + strings.Repeat(" ", gap) + right
 }
