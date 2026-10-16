@@ -1,0 +1,83 @@
+package tui
+
+import (
+	"fmt"
+	"strings"
+	"time"
+
+	"charm.land/bubbletea/v2"
+	"charm.land/lipgloss/v2"
+)
+
+// View composes the chrome around the scrollback viewport. Alt screen and mouse
+// mode are per-view in Bubble Tea v2, not program options.
+func (m model) View() tea.View {
+	if !m.ready {
+		return tea.NewView("正在初始化终端…")
+	}
+
+	body := lipgloss.JoinVertical(
+		lipgloss.Left,
+		m.headerView(),
+		m.vp.View(),
+		m.statusView(),
+		m.input.View(),
+	)
+
+	v := tea.NewView(body)
+	v.AltScreen = m.altScreen
+	v.MouseMode = tea.MouseModeCellMotion
+	v.KeyboardEnhancements = tea.KeyboardEnhancements{ReportEventTypes: true}
+	// The textarea draws its own virtual cursor; only forward a real terminal
+	// cursor when the component asks for one.
+	if c := m.input.Cursor(); c != nil {
+		v.Cursor = c
+	}
+	return v
+}
+
+func (m model) headerView() string {
+	label := m.label
+	if label == "" {
+		label = "未配置模型"
+	}
+	width := max(minViewportWidth, m.width)
+	return m.style.Header.Render(truncate("winky · "+label, width, "…"))
+}
+
+func (m model) statusView() string {
+	left := "就绪"
+	hint := "enter 发送 · ctrl+j 换行 · ctrl+t 推理 · ctrl+c 退出"
+
+	switch {
+	case m.streaming:
+		left = fmt.Sprintf("%s 生成中 · %s", m.sp.View(), time.Since(m.started).Round(time.Second))
+		hint = "esc 取消本轮 · 点击推理标题可展开"
+	case m.err != nil:
+		left = "出错"
+	case m.status != "":
+		left = m.status
+	}
+	if m.turn > 0 {
+		left = fmt.Sprintf("%s · 第 %d 轮", left, m.turn)
+	}
+
+	return m.style.Status.Render(pair(left, hint, max(minViewportWidth, m.width)))
+}
+
+// pair lays out a left and a right column inside width columns.
+func pair(left, right string, width int) string {
+	left = truncate(left, width, "…")
+	right = truncate(right, width, "…")
+
+	lw, rw := displayWidth(left), displayWidth(right)
+	if lw+rw+1 > width {
+		right = ""
+		rw = 0
+	}
+	gap := width - lw - rw
+	if gap < 1 {
+		gap = 1
+	}
+	return left + strings.Repeat(" ", gap) + right
+}
