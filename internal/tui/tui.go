@@ -26,6 +26,7 @@ type Tui struct {
 	opts []tea.ProgramOption
 
 	modelLabel      string
+	workDir         string
 	altScreen       bool
 	expandReasoning bool
 
@@ -49,6 +50,9 @@ func WithProgramOptions(opts ...tea.ProgramOption) Option {
 
 // WithModelLabel sets the label shown in the header, e.g. "deepseek/deepseek-chat".
 func WithModelLabel(label string) Option { return func(t *Tui) { t.modelLabel = label } }
+
+// WithWorkDir sets the working directory shown in the header.
+func WithWorkDir(dir string) Option { return func(t *Tui) { t.workDir = dir } }
 
 // WithAltScreen toggles the alternate screen buffer (default true).
 func WithAltScreen(on bool) Option { return func(t *Tui) { t.altScreen = on } }
@@ -76,6 +80,10 @@ func New(ag Agent, opts ...Option) *Tui {
 	t.m = newModel(ag, newStyles(), t.modelLabel, t.expandReasoning)
 	t.m.eventChan = t.evCh
 	t.m.altScreen = t.altScreen
+	t.m.workDir = t.workDir
+	if home, err := os.UserHomeDir(); err == nil {
+		t.m.home = home
+	}
 	return t
 }
 

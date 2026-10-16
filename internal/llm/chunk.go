@@ -29,7 +29,7 @@ type AgentEnd struct {
 	Timestamp  time.Time
 	StopReason string
 	Err        error
-	// FullContent []string // TODO: record full output
+	Usage      *TokenUsage
 }
 
 /* Reasoning Item */
@@ -74,10 +74,6 @@ type ToolCallArgsDelta struct {
 	Arguments string
 }
 type ToolCallEnd struct{ ID, Arguments string } // 或直接给重组后的完整 ToolCall
-
-/* Token Usage */
-
-type UsageChunk struct{ Usage TokenUsage }
 
 type UnknownChunk struct{ Raw string }
 
@@ -135,10 +131,6 @@ func (c ToolCallArgsDelta) llmChunkType() string {
 
 func (c ToolCallEnd) llmChunkType() string {
 	return "tool_call_end"
-}
-
-func (c UsageChunk) llmChunkType() string {
-	return "usage_chunk"
 }
 
 func (c UnknownChunk) llmChunkType() string {

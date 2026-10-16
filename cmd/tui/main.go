@@ -66,7 +66,7 @@ func main() {
 	// The TUI is the single consumer of a.Events(); do not add another drainer
 	// here, or the two readers will steal each other's events.
 	label := m.Provider + "/" + m.Name
-	if err := tui.New(a, tui.WithModelLabel(label)).Run(ctx); err != nil &&
+	if err := tui.New(a, tui.WithModelLabel(label), tui.WithWorkDir(cfg.Cwd)).Run(ctx); err != nil &&
 		!errors.Is(err, tea.ErrProgramKilled) {
 		log.Fatalf("tui: %v", err)
 	}

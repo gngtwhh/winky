@@ -21,6 +21,7 @@ func (m model) View() tea.View {
 		m.headerView(),
 		m.vp.View(),
 		m.statusView(),
+		m.usageView(),
 		m.input.View(),
 	)
 
@@ -42,7 +43,19 @@ func (m model) headerView() string {
 		label = "未配置模型"
 	}
 	width := max(minViewportWidth, m.width)
-	return m.style.Header.Render(truncate("winky · "+label, width, "…"))
+
+	base := "winky · " + label
+	var candidates []string
+	if m.workDir != "" {
+		candidates = []string{
+			base + " · " + abbrevPath(m.workDir, m.home),
+			base + " · " + tailPath(m.workDir),
+			base,
+		}
+	} else {
+		candidates = []string{base}
+	}
+	return m.style.Header.Render(fitToWidth(candidates, width))
 }
 
 func (m model) statusView() string {
@@ -67,6 +80,13 @@ func (m model) statusView() string {
 	}
 
 	return m.style.Status.Render(pair(left, hint, max(minViewportWidth, m.width)))
+}
+
+// usageView renders the current turn and session token usage.
+func (m model) usageView() string {
+	left := "本轮 " + formatUsage(m.usage)
+	right := "累计 " + formatUsage(m.totalUsage)
+	return m.style.Status.Render(pair(left, right, max(minViewportWidth, m.width)))
 }
 
 // pair lays out a left and a right column inside width columns.

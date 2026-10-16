@@ -13,6 +13,7 @@ import (
 	"charm.land/lipgloss/v2"
 
 	"winky/internal/agent"
+	"winky/internal/llm"
 )
 
 // fakeAgent is a scripted Agent: Turn only records calls, while Events returns a
@@ -299,7 +300,8 @@ func TestTinyWindowKeepsViewportUsable(t *testing.T) {
 	if m.vp.Width() < 1 {
 		t.Fatalf("viewport width = %d, want >= 1", m.vp.Width())
 	}
-	if used := headerRows + statusRows + chromeGap + m.input.Height() + m.vp.Height(); used > m.height {
+	// Count drawn rows only: chromeGap is layout slack, not a rendered row.
+	if used := headerRows + statusRows + usageRows + m.input.Height() + m.vp.Height(); used > m.height {
 		t.Fatalf("chrome uses %d rows of %d", used, m.height)
 	}
 }
@@ -307,13 +309,18 @@ func TestTinyWindowKeepsViewportUsable(t *testing.T) {
 // The status line must never exceed the terminal width.
 func TestViewFitsWidth(t *testing.T) {
 	m := newTestModel(t, newFakeAgent())
+	m.usage = llm.TokenUsage{PromptTokens: 1234, CompletionTokens: 340, TotalTokens: 1574, CachedTokens: 680}
+	m.totalUsage = llm.TokenUsage{PromptTokens: 12340, CompletionTokens: 2100, TotalTokens: 14440, CachedTokens: 7404}
 	m = feed(t, m, tea.WindowSizeMsg{Width: 40, Height: 10})
 
-	if got := displayWidth(m.statusView()); got > 40 {
-		t.Fatalf("status width = %d, want <= 40", got)
-	}
-	if got := displayWidth(m.headerView()); got > 40 {
-		t.Fatalf("header width = %d, want <= 40", got)
+	for name, s := range map[string]string{
+		"status": m.statusView(),
+		"header": m.headerView(),
+		"usage":  m.usageView(),
+	} {
+		if got := displayWidth(s); got > 40 {
+			t.Fatalf("%s width = %d, want <= 40", name, got)
+		}
 	}
 }
 
@@ -395,5 +402,120 @@ func TestAssistantCardShowsTurnDuration(t *testing.T) {
 	}
 	if label := c.labelText(); !strings.Contains(label, "1.5s") {
 		t.Fatalf("assistant label = %q, want it to contain %q", label, "1.5s")
+	}
+}
+
+// The usage row shows this turn's figures and the session total once reported.
+func TestUsageRowShowsTurnAndSession(t *testing.T) {
+	m := newTestModel(t, newFakeAgent())
+	m = feed(t, m, AgentEvent{Event: agent.TurnStart{Timestamp: time.Now()}})
+	m = feed(t, m, AgentEvent{Event: agent.TurnEnd{
+		Reasoning:  "r",
+		Output:     "hi",
+		Usage:      llm.TokenUsage{PromptTokens: 1000, CompletionTokens: 500, TotalTokens: 1500, CachedTokens: 500},
+		TotalUsage: llm.TokenUsage{PromptTokens: 2000, CompletionTokens: 1000, TotalTokens: 3000, CachedTokens: 1000},
+	}})
+
+	got := m.usageView()
+	if !strings.Contains(got, "本轮 ↑1.0k ↓500 · 缓存 50%") {
+		t.Fatalf("usage row = %q, want current-turn figures", got)
+	}
+	if !strings.Contains(got, "累计 ↑2.0k ↓1.0k · 缓存 50%") {
+		t.Fatalf("usage row = %q, want session figures", got)
+	}
+}
+
+// Usage must be recorded even when the command result settles the turn before
+// the terminal event arrives.
+func TestUsageRecordedAfterTurnResultSettles(t *testing.T) {
+	m := newTestModel(t, newFakeAgent())
+	m = feed(t, m, AgentEvent{Event: agent.TurnStart{Timestamp: time.Now()}})
+
+	next, _ := m.Update(turnResult{
+		TurnID:   m.turn,
+		Result:   agent.TurnResult{Reasoning: "r", Output: "hi"},
+		Duration: time.Second,
+	})
+	m = next.(model)
+	if m.streaming {
+		t.Fatal("turnResult did not settle the turn")
+	}
+
+	m = feed(t, m, AgentEvent{Event: agent.TurnEnd{
+		Reasoning:  "r",
+		Output:     "hi",
+		Usage:      llm.TokenUsage{PromptTokens: 100, CompletionTokens: 50, TotalTokens: 150, CachedTokens: 50},
+		TotalUsage: llm.TokenUsage{PromptTokens: 200, CompletionTokens: 100, TotalTokens: 300, CachedTokens: 100},
+	}})
+
+	if m.usage.TotalTokens != 150 || m.totalUsage.TotalTokens != 300 {
+		t.Fatalf("usage not recorded after settle: usage=%+v total=%+v", m.usage, m.totalUsage)
+	}
+}
+
+// A new turn clears the per-turn usage but keeps the session total.
+func TestUsageResetsPerTurn(t *testing.T) {
+	m := newTestModel(t, newFakeAgent())
+	m = feed(t, m, AgentEvent{Event: agent.TurnStart{Timestamp: time.Now()}})
+	m = feed(t, m, AgentEvent{Event: agent.TurnEnd{
+		Reasoning:  "r",
+		Output:     "hi",
+		Usage:      llm.TokenUsage{PromptTokens: 100, CompletionTokens: 50, TotalTokens: 150, CachedTokens: 50},
+		TotalUsage: llm.TokenUsage{PromptTokens: 100, CompletionTokens: 50, TotalTokens: 150, CachedTokens: 50},
+	}})
+	if m.usage.TotalTokens == 0 || m.totalUsage.TotalTokens == 0 {
+		t.Fatal("usage not set after first turn")
+	}
+
+	m = feed(t, m, AgentEvent{Event: agent.TurnStart{Timestamp: time.Now()}})
+	if m.usage.TotalTokens != 0 {
+		t.Fatalf("per-turn usage not reset on new turn: %+v", m.usage)
+	}
+	if m.totalUsage.TotalTokens == 0 {
+		t.Fatal("session total must survive a new turn")
+	}
+}
+
+// A failed turn still records the usage the provider reported before failing.
+func TestFailedTurnRecordsUsage(t *testing.T) {
+	m := newTestModel(t, newFakeAgent())
+	m = feed(t, m, AgentEvent{Event: agent.TurnStart{Timestamp: time.Now()}})
+	m = feed(t, m, AgentEvent{Event: agent.TurnFailed{
+		Err:        errors.New("boom"),
+		Usage:      llm.TokenUsage{PromptTokens: 100, CompletionTokens: 10, TotalTokens: 110},
+		TotalUsage: llm.TokenUsage{PromptTokens: 100, CompletionTokens: 10, TotalTokens: 110},
+	}})
+	if m.usage.TotalTokens != 110 || m.totalUsage.TotalTokens != 110 {
+		t.Fatalf("failed-turn usage not recorded: usage=%+v total=%+v", m.usage, m.totalUsage)
+	}
+}
+
+// A cancelled turn must drop its usage entirely.
+func TestCancelledTurnDropsUsage(t *testing.T) {
+	m := newTestModel(t, newFakeAgent())
+	m.input.SetValue("hi")
+	next, _ := m.Update(keyPress(tea.KeyEnter, 0))
+	m = next.(model)
+	next, _ = m.Update(keyPress(tea.KeyEsc, 0))
+	m = next.(model)
+
+	m = feed(t, m, AgentEvent{Event: agent.TurnEnd{
+		Reasoning:  "r",
+		Output:     "hi",
+		Usage:      llm.TokenUsage{PromptTokens: 100, CompletionTokens: 50, TotalTokens: 150, CachedTokens: 50},
+		TotalUsage: llm.TokenUsage{PromptTokens: 100, CompletionTokens: 50, TotalTokens: 150, CachedTokens: 50},
+	}})
+	if m.usage.TotalTokens != 0 || m.totalUsage.TotalTokens != 0 {
+		t.Fatalf("cancelled-turn usage recorded: usage=%+v total=%+v", m.usage, m.totalUsage)
+	}
+}
+
+// The header shows the model and, when set, the working directory.
+func TestHeaderShowsWorkDir(t *testing.T) {
+	m := newTestModel(t, newFakeAgent())
+	m.workDir = "D:/data/code"
+	m.home = "C:/Users/me"
+	if got := m.headerView(); !strings.Contains(got, "winky · test/model · D:/data/code") {
+		t.Fatalf("header = %q, want model and workdir", got)
 	}
 }

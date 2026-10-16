@@ -1,6 +1,10 @@
 package agent
 
-import "time"
+import (
+	"time"
+
+	"winky/internal/llm"
+)
 
 // Event is a single notification emitted by an Agent during a Turn.
 type Event interface{ agentEventType() string }
@@ -20,16 +24,22 @@ type OutputDelta struct {
 	Text string
 }
 
-// TurnEnd marks a successfully completed turn and carries the full
-// reasoning and output text accumulated during it.
+// TurnEnd marks a successfully completed turn and carries the full reasoning
+// and output text, plus this turn's usage and the session total. A zero
+// Usage.TotalTokens means the provider reported no usage.
 type TurnEnd struct {
-	Reasoning string
-	Output    string
+	Reasoning  string
+	Output     string
+	Usage      llm.TokenUsage
+	TotalUsage llm.TokenUsage
 }
 
-// TurnFailed marks a turn that ended with an error.
+// TurnFailed marks a turn that ended with an error. It may still carry usage
+// when the provider reported it before failing.
 type TurnFailed struct {
-	Err error
+	Err        error
+	Usage      llm.TokenUsage
+	TotalUsage llm.TokenUsage
 }
 
 func (TurnStart) agentEventType() string      { return "turn_start" }

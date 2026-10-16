@@ -10,12 +10,15 @@ import (
 	"charm.land/bubbles/v2/viewport"
 	tea "charm.land/bubbletea/v2"
 	"charm.land/lipgloss/v2"
+
+	"winky/internal/llm"
 )
 
 // Chrome around the scrollback viewport.
 const (
 	headerRows = 1
 	statusRows = 1
+	usageRows  = 1
 	chromeGap  = 1
 
 	minViewportHeight = 1
@@ -77,14 +80,20 @@ type model struct {
 	output          string       // accumulated OutputDelta of the live turn
 	expandReasoning bool
 
+	// Token usage: current turn and session total (zero TotalTokens = none).
+	usage      llm.TokenUsage
+	totalUsage llm.TokenUsage
+
 	// Status line.
 	status  string
 	err     error
 	started time.Time
 
-	style Styles
-	keys  keyMap
-	label string
+	style   Styles
+	keys    keyMap
+	label   string
+	workDir string
+	home    string
 }
 
 func newModel(ag Agent, st Styles, label string, expandReasoning bool) model {
@@ -159,7 +168,7 @@ func (m *model) layout() {
 
 	// The input may not eat the whole window on a short terminal: shrink its
 	// ceiling before measuring it.
-	fixed := headerRows + statusRows + chromeGap
+	fixed := headerRows + statusRows + usageRows + chromeGap
 	maxInput := min(maxInputHeight, max(1, m.height-fixed-minViewportHeight))
 	m.input.MaxHeight = maxInput
 	m.input.MinHeight = min(minInputHeight, maxInput)

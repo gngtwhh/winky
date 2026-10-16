@@ -78,12 +78,14 @@ func consumeResponsesStream(
 			ch <- llm.AgentEnd{
 				Timestamp:  time.Now(),
 				StopReason: llm.StopReasonDone,
+				Usage:      toTokenUsage(e.Response.Usage),
 			}
 			return
 		case responses.ResponseFailedEvent:
 			ch <- llm.AgentEnd{
 				Timestamp:  time.Now(),
 				StopReason: llm.StopReasonFailed,
+				Usage:      toTokenUsage(e.Response.Usage),
 			}
 			return
 		case responses.ResponseErrorEvent:
@@ -97,6 +99,7 @@ func consumeResponsesStream(
 			ch <- llm.AgentEnd{
 				Timestamp:  time.Now(),
 				StopReason: llm.StopReasonIncomplete,
+				Usage:      toTokenUsage(e.Response.Usage),
 			}
 			return
 		// Item
@@ -237,6 +240,21 @@ func consumeResponsesStream(
 	ch <- llm.AgentEnd{
 		Timestamp:  time.Now(),
 		StopReason: llm.StopReasonUnknown,
+	}
+}
+
+// toTokenUsage maps a provider usage struct to the shared llm.TokenUsage.
+// It returns nil when the provider reported no usage: a real completed turn
+// always consumes at least one input token, so TotalTokens == 0 means absent.
+func toTokenUsage(u responses.ResponseUsage) *llm.TokenUsage {
+	if u.TotalTokens == 0 {
+		return nil
+	}
+	return &llm.TokenUsage{
+		PromptTokens:     int(u.InputTokens),
+		CompletionTokens: int(u.OutputTokens),
+		TotalTokens:      int(u.TotalTokens),
+		CachedTokens:     int(u.InputTokensDetails.CachedTokens),
 	}
 }
 

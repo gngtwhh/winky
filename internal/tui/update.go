@@ -11,6 +11,7 @@ import (
 	tea "charm.land/bubbletea/v2"
 
 	"winky/internal/agent"
+	"winky/internal/llm"
 )
 
 // errAgentNil guards against running without a configured agent.
@@ -160,9 +161,10 @@ func (m model) handleMouse(msg tea.Msg) (tea.Model, tea.Cmd) {
 // handleEvent mutates the model, so it runs on a pointer to the local copy held
 // by Update (see the note there).
 //
-// Every branch except TurnStart is gated on m.streaming, which is cleared when a
-// turn is cancelled or settled. That gate is what stops a cancelled turn's late
-// deltas from appending cards or resurrecting the streaming state.
+// Delta events are gated on m.streaming (cleared when a turn is cancelled or
+// settled) so a cancelled turn's late deltas cannot resurrect the streaming
+// state. Terminal events still record usage after the turn has settled, but are
+// dropped entirely for a cancelled turn.
 func (m *model) handleEvent(e agent.Event) tea.Cmd {
 	switch ev := e.(type) {
 	case agent.TurnStart:
@@ -180,6 +182,7 @@ func (m *model) handleEvent(e agent.Event) tea.Cmd {
 		}
 		m.reasoning = ""
 		m.output = ""
+		m.usage = llm.TokenUsage{}
 		// Cards still marked live mean the previous turn never delivered a
 		// TurnEnd or TurnFailed; fold them so the view cannot show two live
 		// blocks at once.
@@ -222,7 +225,15 @@ func (m *model) handleEvent(e agent.Event) tea.Cmd {
 		return nil
 
 	case agent.TurnEnd:
+		if m.cancelled[m.turn] {
+			return nil
+		}
+		// Usage rides the terminal event; record it even if the command result
+		// already settled this turn.
+		m.usage = ev.Usage
+		m.totalUsage = ev.TotalUsage
 		if !m.streaming {
+			m.rebuild()
 			return nil
 		}
 		// TurnEnd carries the authoritative full text; the deltas were only a
@@ -241,7 +252,13 @@ func (m *model) handleEvent(e agent.Event) tea.Cmd {
 		return nil
 
 	case agent.TurnFailed:
+		if m.cancelled[m.turn] {
+			return nil
+		}
+		m.usage = ev.Usage
+		m.totalUsage = ev.TotalUsage
 		if !m.streaming {
+			m.rebuild()
 			return nil
 		}
 		m.finishTurn()
@@ -327,6 +344,7 @@ func (m model) submit() (tea.Model, tea.Cmd) {
 	m.input.Reset()
 	m.reasoning = ""
 	m.output = ""
+	m.usage = llm.TokenUsage{}
 
 	m.turn++
 	m.streaming = true

@@ -23,7 +23,8 @@ type Agent struct {
 	maxTokens    int
 	events       chan Event
 
-	history []llm.Message
+	history    []llm.Message
+	totalUsage llm.TokenUsage
 }
 
 // Option configures an Agent.
@@ -96,6 +97,8 @@ func (a *Agent) Turn(ctx context.Context, input string) (TurnResult, error) {
 	var output strings.Builder
 	stopReason := llm.StopReasonUnknown
 	var streamErr error
+	var turnUsage llm.TokenUsage
+	var hasUsage bool
 
 	var uc []string
 
@@ -115,6 +118,10 @@ func (a *Agent) Turn(ctx context.Context, input string) (TurnResult, error) {
 		case llm.AgentEnd:
 			stopReason = c.StopReason
 			streamErr = c.Err
+			if c.Usage != nil {
+				turnUsage = *c.Usage
+				hasUsage = true
+			}
 
 		case llm.UnknownChunk:
 			uc = append(uc, c.Raw)
@@ -123,6 +130,8 @@ func (a *Agent) Turn(ctx context.Context, input string) (TurnResult, error) {
 
 	// just for debug
 	// fmt.Println("{\"all\":[" + strings.Join(uc, ",") + "]}")
+
+	a.totalUsage = a.totalUsage.Add(turnUsage)
 
 	result := TurnResult{
 		Reasoning: reasoning.String(),
@@ -133,22 +142,29 @@ func (a *Agent) Turn(ctx context.Context, input string) (TurnResult, error) {
 		if streamErr == nil {
 			streamErr = fmt.Errorf("stream stopped: %s", stopReason)
 		}
-		a.emit(TurnFailed{Err: streamErr})
+		a.emit(TurnFailed{Err: streamErr, Usage: turnUsage, TotalUsage: a.totalUsage})
 		return TurnResult{}, streamErr
 	}
 
+	var msgUsage *llm.TokenUsage
+	if hasUsage {
+		msgUsage = &turnUsage
+	}
 	a.history = append(
 		a.history, llm.Message{
 			Role:      llm.RoleAssistant,
 			Content:   result.Output,
+			Usage:     msgUsage,
 			Timestamp: time.Now(),
 		},
 	)
 
 	a.emit(
 		TurnEnd{
-			Reasoning: result.Reasoning,
-			Output:    result.Output,
+			Reasoning:  result.Reasoning,
+			Output:     result.Output,
+			Usage:      turnUsage,
+			TotalUsage: a.totalUsage,
 		},
 	)
 
