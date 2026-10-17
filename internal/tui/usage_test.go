@@ -33,7 +33,7 @@ func TestFormatUsage(t *testing.T) {
 		want string
 	}{
 		{"none", llm.TokenUsage{}, "—"},
-		{"full", llm.TokenUsage{PromptTokens: 1000, CompletionTokens: 500, TotalTokens: 1500, CachedTokens: 500}, "↑1.0k ↓500 · 缓存 50%"},
+		{"full", llm.TokenUsage{PromptTokens: 1000, CompletionTokens: 500, TotalTokens: 1500, CachedTokens: 500}, "↑1.0k ↓500 · Cache 50%"},
 		{"no input", llm.TokenUsage{PromptTokens: 0, CompletionTokens: 10, TotalTokens: 10}, "↑0 ↓10"},
 	}
 	for _, tc := range cases {

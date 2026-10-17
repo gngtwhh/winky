@@ -106,7 +106,7 @@ func (m model) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 			// Remember the abandoned turn so its late events and its command
 			// result are both discarded.
 			m.markCancelled()
-			m.status = "本轮已取消"
+			m.status = "Turn cancelled"
 		}
 		return m, nil
 
@@ -116,9 +116,9 @@ func (m model) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 
 	case key.Matches(msg, m.keys.ToggleAll):
 		if m.toggleAllReasoning() {
-			m.status = "已展开全部推理"
+			m.status = "unfolded all reasoning"
 		} else {
-			m.status = "已折叠全部推理"
+			m.status = "folded all reasoning"
 		}
 		m.rebuild()
 		return m, nil
@@ -187,12 +187,14 @@ func (m *model) handleEvent(e agent.Event) tea.Cmd {
 		// TurnEnd or TurnFailed; fold them so the view cannot show two live
 		// blocks at once.
 		m.freezeLiveCards()
-		m.appendCard(card{
-			Kind:     cardReasoning,
-			At:       m.started,
-			Live:     true,
-			Expanded: true, // streamed inline; collapses on the first output delta
-		})
+		m.appendCard(
+			card{
+				Kind:     cardReasoning,
+				At:       m.started,
+				Live:     true,
+				Expanded: true, // streamed inline; collapses on the first output delta
+			},
+		)
 		m.appendCard(card{Kind: cardAssistant, At: m.started, Live: true})
 		return tickCmd(m.turn)
 
@@ -329,12 +331,12 @@ func (m model) submit() (tea.Model, tea.Cmd) {
 	}
 	if m.ag == nil {
 		m.err = errAgentNil
-		m.status = "未配置 agent"
+		m.status = "agent is not configured"
 		m.appendCard(card{Kind: cardNotice, Text: errAgentNil.Error(), At: time.Now()})
 		return m, nil
 	}
 	if m.streaming {
-		m.status = "正在生成中，请等待本轮结束"
+		m.status = "Generating...Please wait"
 		return m, nil
 	}
 

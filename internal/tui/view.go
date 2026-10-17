@@ -13,7 +13,7 @@ import (
 // mode are per-view in Bubble Tea v2, not program options.
 func (m model) View() tea.View {
 	if !m.ready {
-		return tea.NewView("正在初始化终端…")
+		return tea.NewView("initializing the terminal...")
 	}
 
 	body := lipgloss.JoinVertical(
@@ -40,7 +40,7 @@ func (m model) View() tea.View {
 func (m model) headerView() string {
 	label := m.label
 	if label == "" {
-		label = "未配置模型"
+		label = "Unconfigured model"
 	}
 	width := max(minViewportWidth, m.width)
 
@@ -59,20 +59,20 @@ func (m model) headerView() string {
 }
 
 func (m model) statusView() string {
-	left := "就绪"
-	hint := "enter 发送 · ctrl+j 换行 · ctrl+t 推理 · ctrl+c 退出"
+	left := "Ready"
+	hint := "[enter] Send · [ctrl+j] Line Feed · [ctrl+t] Reasoning · [ctrl+c] Quit"
 
 	switch {
 	case m.streaming:
-		left = fmt.Sprintf("%s 生成中 · %s", m.sp.View(), time.Since(m.started).Round(time.Second))
-		hint = "esc 取消本轮 · 点击推理标题可展开"
+		left = fmt.Sprintf("%s generating · %s", m.sp.View(), time.Since(m.started).Round(time.Second))
+		hint = "esc Abort · Press Reasoning Title to unfold"
 	case m.err != nil:
-		left = "出错"
+		left = "Error"
 	case m.status != "":
 		left = m.status
 	}
 	if m.turn > 0 {
-		left = fmt.Sprintf("%s · 第 %d 轮", left, m.turn)
+		left = fmt.Sprintf("%s · Turn %d", left, m.turn)
 	}
 	if !m.atBottom() {
 		// The user has scrolled up; there is more history below the fold.
@@ -84,8 +84,8 @@ func (m model) statusView() string {
 
 // usageView renders the current turn and session token usage.
 func (m model) usageView() string {
-	left := "本轮 " + formatUsage(m.usage)
-	right := "累计 " + formatUsage(m.totalUsage)
+	left := "This turn " + formatUsage(m.usage)
+	right := "Total " + formatUsage(m.totalUsage)
 	return m.style.Status.Render(pair(left, right, max(minViewportWidth, m.width)))
 }
 

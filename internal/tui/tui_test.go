@@ -417,10 +417,10 @@ func TestUsageRowShowsTurnAndSession(t *testing.T) {
 	}})
 
 	got := m.usageView()
-	if !strings.Contains(got, "本轮 ↑1.0k ↓500 · 缓存 50%") {
+	if !strings.Contains(got, "This turn ↑1.0k ↓500 · Cache 50%") {
 		t.Fatalf("usage row = %q, want current-turn figures", got)
 	}
-	if !strings.Contains(got, "累计 ↑2.0k ↓1.0k · 缓存 50%") {
+	if !strings.Contains(got, "Total ↑2.0k ↓1.0k · Cache 50%") {
 		t.Fatalf("usage row = %q, want session figures", got)
 	}
 }
@@ -517,5 +517,25 @@ func TestHeaderShowsWorkDir(t *testing.T) {
 	m.home = "C:/Users/me"
 	if got := m.headerView(); !strings.Contains(got, "winky · test/model · D:/data/code") {
 		t.Fatalf("header = %q, want model and workdir", got)
+	}
+}
+
+// The input defaults to one line, grows up to maxInputHeight, and keeps
+// accepting newlines (scrolling) beyond that instead of blocking them.
+func TestInputGrowsAndScrolls(t *testing.T) {
+	m := newTestModel(t, newFakeAgent())
+	if h := m.input.Height(); h != minInputHeight {
+		t.Fatalf("empty input height = %d, want %d", h, minInputHeight)
+	}
+
+	for i := 0; i < 5; i++ {
+		m = feed(t, m, keyPress('j', tea.ModCtrl))
+	}
+
+	if h := m.input.Height(); h != maxInputHeight {
+		t.Fatalf("input height = %d, want capped at %d", h, maxInputHeight)
+	}
+	if got := strings.Count(m.input.Value(), "\n"); got != 5 {
+		t.Fatalf("input newlines = %d, want 5 (newlines must not be blocked)", got)
 	}
 }

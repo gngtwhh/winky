@@ -20,14 +20,14 @@ func formatTokens(n int) string {
 	}
 }
 
-// formatUsage renders "↑in ↓out · 缓存N%", or "—" when there is no data.
+// formatUsage renders "↑in ↓out · Cache N%", or "—" when there is no data.
 func formatUsage(u llm.TokenUsage) string {
 	if u.TotalTokens == 0 {
 		return "—"
 	}
 	out := fmt.Sprintf("↑%s ↓%s", formatTokens(u.PromptTokens), formatTokens(u.CompletionTokens))
 	if u.PromptTokens > 0 {
-		out += fmt.Sprintf(" · 缓存 %d%%", int(u.CacheHitRate()*100+0.5))
+		out += fmt.Sprintf(" · Cache %d%%", int(u.CacheHitRate()*100+0.5))
 	}
 	return out
 }

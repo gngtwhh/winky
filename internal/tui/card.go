@@ -118,9 +118,9 @@ func collapseHint(text string) string {
 		}
 	}
 	if rows == 0 {
-		return "(推理已折叠)"
+		return "(Reasoning folded)"
 	}
-	return fmt.Sprintf("(推理已折叠 · %d 行 · 点击展开)", rows)
+	return fmt.Sprintf("(Reasoning folded · %d lines · Click to expand)", rows)
 }
 
 // rebuild re-renders every card into the viewport and records which content

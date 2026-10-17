@@ -24,8 +24,13 @@ const (
 	minViewportHeight = 1
 	minViewportWidth  = 20
 
-	minInputHeight = 3
-	maxInputHeight = 8
+	minInputHeight = 1
+	maxInputHeight = 3
+
+	// maxInputContentHeight lets the input scroll far beyond its visible
+	// maxInputHeight rows instead of blocking further input; the textarea's own
+	// logical-line cap still applies.
+	maxInputContentHeight = 10000
 )
 
 // keyMap holds the TUI-level bindings. Widget bindings (textarea, viewport)
@@ -98,13 +103,15 @@ type model struct {
 
 func newModel(ag Agent, st Styles, label string, expandReasoning bool) model {
 	ta := textarea.New()
-	ta.Placeholder = "输入消息…  (enter 发送 · ctrl+j 换行 · esc 取消)"
+	ta.Placeholder = "What shall we do today?  ([enter] Send · [ctrl+j] Line Feed · [esc] Abort)"
 	ta.Prompt = "> "
 	ta.ShowLineNumbers = false
 	ta.CharLimit = 0
 	ta.MinHeight = minInputHeight
 	ta.MaxHeight = maxInputHeight
 	ta.DynamicHeight = true
+	ta.MaxContentHeight = maxInputContentHeight
+	ta.SetHeight(minInputHeight)
 
 	// The default placeholder foreground (ANSI 240) is nearly invisible
 	// against the cursor-line background the textarea paints under empty
@@ -119,7 +126,7 @@ func newModel(ag Agent, st Styles, label string, expandReasoning bool) model {
 	km := textarea.DefaultKeyMap()
 	km.InsertNewline = key.NewBinding(
 		key.WithKeys("ctrl+j", "ctrl+m", "ctrl+enter"),
-		key.WithHelp("ctrl+j", "换行"),
+		key.WithHelp("ctrl+j", "Line Feed"),
 	)
 	ta.KeyMap = km
 	ta.Focus()
