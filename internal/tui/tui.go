@@ -13,7 +13,7 @@ import (
 // Agent is the subset of *agent.Agent the TUI needs. Keeping it an interface
 // lets tests inject a scripted event channel without a real LLM.
 type Agent interface {
-	Turn(ctx context.Context, input string) (agent.TurnResult, error)
+	Turn(ctx context.Context, input string) (agent.Turn, error)
 	Events() <-chan agent.Event
 }
 
@@ -58,8 +58,8 @@ func WithWorkDir(dir string) Option { return func(t *Tui) { t.workDir = dir } }
 func WithAltScreen(on bool) Option { return func(t *Tui) { t.altScreen = on } }
 
 // WithReasoningExpanded controls whether a finished reasoning block stays
-// expanded. When false (the default), reasoning streams inline and folds away
-// as soon as the answer starts.
+// expanded. Default false: reasoning streams inline and folds when the answer
+// starts.
 func WithReasoningExpanded(on bool) Option {
 	return func(t *Tui) { t.expandReasoning = on }
 }
@@ -88,8 +88,8 @@ func New(ag Agent, opts ...Option) *Tui {
 }
 
 // Run starts the event pump and blocks until the user quits or ctx is
-// cancelled. A context passed through tea.WithContext is the parent of the one
-// used here, so cancelling it also unblocks any in-flight turn.
+// cancelled. ctx is also the parent of the context passed through
+// tea.WithContext, so cancelling it unblocks any in-flight turn.
 func (t *Tui) Run(ctx context.Context) error {
 	ctx, cancel := context.WithCancel(ctx)
 	defer cancel()

@@ -8,7 +8,6 @@ import (
 	"winky/internal/llm"
 )
 
-// formatTokens renders a token count with a compact suffix.
 func formatTokens(n int) string {
 	switch {
 	case n < 1000:
@@ -21,13 +20,25 @@ func formatTokens(n int) string {
 }
 
 // formatUsage renders "↑in ↓out · Cache N%", or "—" when there is no data.
+//
+// An uncached turn is the normal case (cold cache, or too short a prompt), so a
+// zero cache count renders as "Cache —" rather than the misleading "Cache 0%".
+// Any real hit is floored at 1% for the same reason.
 func formatUsage(u llm.TokenUsage) string {
 	if u.TotalTokens == 0 {
 		return "—"
 	}
 	out := fmt.Sprintf("↑%s ↓%s", formatTokens(u.PromptTokens), formatTokens(u.CompletionTokens))
 	if u.PromptTokens > 0 {
-		out += fmt.Sprintf(" · Cache %d%%", int(u.CacheHitRate()*100+0.5))
+		if u.CachedTokens <= 0 {
+			out += " · Cache —"
+		} else {
+			pct := int(u.CacheHitRate()*100 + 0.5)
+			if pct < 1 {
+				pct = 1
+			}
+			out += fmt.Sprintf(" · Cache %d%%", pct)
+		}
 	}
 	return out
 }
@@ -61,7 +72,6 @@ func abbrevPath(path, home string) string {
 	return path
 }
 
-// tailPath returns an ellipsis plus the last path component.
 func tailPath(path string) string {
 	return "…" + filepath.Base(path)
 }

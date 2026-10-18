@@ -60,12 +60,12 @@ func (m model) headerView() string {
 
 func (m model) statusView() string {
 	left := "Ready"
-	hint := "[enter] Send · [ctrl+j] Line Feed · [ctrl+t] Reasoning · [ctrl+c] Quit"
+	hint := "[enter] Send · [ctrl+j] Line Feed · [ctrl+t] Thinking · [ctrl+c] Quit"
 
 	switch {
 	case m.streaming:
 		left = fmt.Sprintf("%s generating · %s", m.sp.View(), time.Since(m.started).Round(time.Second))
-		hint = "esc Abort · Press Reasoning Title to unfold"
+		hint = "esc Abort · Press a Thinking title to unfold"
 	case m.err != nil:
 		left = "Error"
 	case m.status != "":
@@ -82,14 +82,12 @@ func (m model) statusView() string {
 	return m.style.Status.Render(pair(left, hint, max(minViewportWidth, m.width)))
 }
 
-// usageView renders the current turn and session token usage.
 func (m model) usageView() string {
 	left := "This turn " + formatUsage(m.usage)
 	right := "Total " + formatUsage(m.totalUsage)
 	return m.style.Status.Render(pair(left, right, max(minViewportWidth, m.width)))
 }
 
-// pair lays out a left and a right column inside width columns.
 func pair(left, right string, width int) string {
 	left = truncate(left, width, "…")
 	right = truncate(right, width, "…")

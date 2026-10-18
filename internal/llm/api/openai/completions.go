@@ -133,8 +133,8 @@ package openai
 // 	if req.Temperature != 0 {
 // 		params.Temperature = openai.Float(req.Temperature)
 // 	}
-// 	if req.MaxTokens > 0 {
-// 		params.MaxTokens = openai.Int(int64(req.MaxTokens))
+// 	if req.MaxOutputTokens > 0 {
+// 		params.MaxTokens = openai.Int(int64(req.MaxOutputTokens))
 // 	}
 //
 // 	if len(req.Tools) > 0 {

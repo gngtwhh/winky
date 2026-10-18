@@ -17,11 +17,9 @@ import (
 // errAgentNil guards against running without a configured agent.
 var errAgentNil = errors.New("tui: no agent configured")
 
-// Update reduces every message. Exactly one waitEvent is in flight at any time:
-// it is armed in Init and re-armed on every AgentEvent.
-//
-// Update returns the model by value, so every mutation helper below runs on the
-// addressable local copy and the updated copy is returned.
+// Update reduces every message. Exactly one waitEvent is in flight at any time,
+// armed in Init and re-armed on every AgentEvent. The model is a value type, so
+// the helpers below mutate the addressable local copy.
 func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	switch msg := msg.(type) {
 	case tea.WindowSizeMsg:
@@ -33,8 +31,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, nil
 
 	case AgentEvent:
-		// handleEvent mutates through a pointer: Update's receiver is a copy,
-		// so a value receiver there would silently discard every change.
+		// handleEvent needs a pointer: Update's receiver is a copy.
 		eventCmd := m.handleEvent(msg.Event)
 		// Re-arm the receiver in the same step that consumed an event.
 		return m, tea.Batch(eventCmd, waitEvent(m.eventChan))
@@ -103,8 +100,6 @@ func (m model) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		if m.turnCanc != nil {
 			m.turnCanc()
 			m.turnCanc = nil
-			// Remember the abandoned turn so its late events and its command
-			// result are both discarded.
 			m.markCancelled()
 			m.status = "Turn cancelled"
 		}
@@ -134,8 +129,7 @@ func (m model) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		return m, nil
 	}
 
-	// Everything else (ctrl+j, ctrl+enter, arrows, home/end, paste, selection)
-	// belongs to the textarea, which keeps the cursor visible on its own.
+	// Everything else belongs to the textarea, which keeps the cursor visible.
 	var cmd tea.Cmd
 	m.input, cmd = m.input.Update(msg)
 	m.relayoutIfNeeded()
@@ -158,13 +152,11 @@ func (m model) handleMouse(msg tea.Msg) (tea.Model, tea.Cmd) {
 	return m, cmd
 }
 
-// handleEvent mutates the model, so it runs on a pointer to the local copy held
-// by Update (see the note there).
+// handleEvent mutates the model, so it runs on a pointer to Update's local copy.
 //
-// Delta events are gated on m.streaming (cleared when a turn is cancelled or
-// settled) so a cancelled turn's late deltas cannot resurrect the streaming
-// state. Terminal events still record usage after the turn has settled, but are
-// dropped entirely for a cancelled turn.
+// Delta events are gated on m.streaming so a cancelled turn's late deltas cannot
+// resurrect the streaming state; terminal events still record usage after the
+// turn settled, but are dropped for a cancelled turn.
 func (m *model) handleEvent(e agent.Event) tea.Cmd {
 	switch ev := e.(type) {
 	case agent.TurnStart:
@@ -180,51 +172,53 @@ func (m *model) handleEvent(e agent.Event) tea.Cmd {
 		if m.started.IsZero() {
 			m.started = time.Now()
 		}
-		m.reasoning = ""
-		m.output = ""
 		m.usage = llm.TokenUsage{}
-		// Cards still marked live mean the previous turn never delivered a
-		// TurnEnd or TurnFailed; fold them so the view cannot show two live
-		// blocks at once.
+		// Live cards left over mean the previous turn never delivered a
+		// TurnEnd/TurnFailed; fold them so two live blocks cannot coexist.
 		m.freezeLiveCards()
-		m.appendCard(
-			card{
-				Kind:     cardReasoning,
-				At:       m.started,
-				Live:     true,
-				Expanded: true, // streamed inline; collapses on the first output delta
-			},
-		)
-		m.appendCard(card{Kind: cardAssistant, At: m.started, Live: true})
+		m.liveBlocks = make(map[blockKey]int)
+		m.turnStartIdx = len(m.history)
 		return tickCmd(m.turn)
 
 	case agent.ReasoningDelta:
 		if !m.streaming || m.cancelled[m.turn] {
 			return nil
 		}
-		m.reasoning += ev.Text
-		if c := m.liveCard(cardReasoning); c != nil {
-			c.Text = m.reasoning
+		m.appendDelta(blockKey{kind: cardReasoning, id: ev.ItemID}, ev.Text)
+
+	case agent.ReasoningSummaryDelta:
+		if !m.streaming || m.cancelled[m.turn] {
+			return nil
 		}
-		m.dirty = true
-		return nil
+		m.appendDelta(blockKey{kind: cardSummary, id: ev.ItemID}, ev.Text)
 
 	case agent.OutputDelta:
 		if !m.streaming || m.cancelled[m.turn] {
 			return nil
 		}
-		// First output delta: fold the reasoning away and start streaming the
-		// answer. `Live` guarantees this happens exactly once per turn.
-		if c := m.liveCard(cardReasoning); c != nil && c.Live {
-			c.Live = false
-			c.Expanded = m.expandReasoning
+		m.appendDelta(blockKey{kind: cardAssistant, id: ev.ItemID}, ev.Text)
+
+	case agent.ToolCallStart:
+		if !m.streaming || m.cancelled[m.turn] {
+			return nil
 		}
-		m.output += ev.Text
-		if c := m.liveCard(cardAssistant); c != nil {
-			c.Text = m.output
-		}
+		idx := m.ensureBlock(blockKey{kind: cardTool, id: ev.CallID})
+		m.history[idx].Title = ev.Name
 		m.dirty = true
-		return nil
+
+	case agent.ToolCallArgsDelta:
+		if !m.streaming || m.cancelled[m.turn] {
+			return nil
+		}
+		m.appendDelta(blockKey{kind: cardTool, id: ev.CallID}, ev.Delta)
+
+	case agent.ToolCallEnd:
+		if !m.streaming || m.cancelled[m.turn] {
+			return nil
+		}
+		idx := m.ensureBlock(blockKey{kind: cardTool, id: ev.CallID})
+		m.history[idx].Text = ev.Arguments
+		m.dirty = true
 
 	case agent.TurnEnd:
 		if m.cancelled[m.turn] {
@@ -238,17 +232,7 @@ func (m *model) handleEvent(e agent.Event) tea.Cmd {
 			m.rebuild()
 			return nil
 		}
-		// TurnEnd carries the authoritative full text; the deltas were only a
-		// live preview.
-		if c := m.liveCard(cardReasoning); c != nil {
-			c.Text = ev.Reasoning
-			c.Live = false
-			c.Expanded = m.expandReasoning
-		}
-		if c := m.liveCard(cardAssistant); c != nil {
-			c.Text = ev.Output
-			c.Live = false
-		}
+		m.applyTurn(ev.Turn)
 		m.finishTurn()
 		m.rebuild()
 		return nil
@@ -263,6 +247,9 @@ func (m *model) handleEvent(e agent.Event) tea.Cmd {
 			m.rebuild()
 			return nil
 		}
+		// Drop any partial live blocks from the failed turn.
+		m.history = m.history[:m.turnStartIdx]
+		m.liveBlocks = nil
 		m.finishTurn()
 		m.err = ev.Err
 		m.status = ""
@@ -270,6 +257,64 @@ func (m *model) handleEvent(e agent.Event) tea.Cmd {
 		return nil
 	}
 	return nil
+}
+
+func (m *model) appendDelta(key blockKey, text string) {
+	idx := m.ensureBlock(key)
+	m.history[idx].Text += text
+	m.dirty = true
+}
+
+func (m *model) ensureBlock(key blockKey) int {
+	if idx, ok := m.liveBlocks[key]; ok {
+		return idx
+	}
+	c := card{Kind: key.kind, ID: key.id, At: m.started, Live: true}
+	if key.kind.collapsible() {
+		c.Expanded = true // stream inline
+	}
+	m.history = append(m.history, c)
+	m.liveBlocks[key] = len(m.history) - 1
+	m.dirty = true
+	return len(m.history) - 1
+}
+
+func (m *model) applyTurn(turn agent.Turn) {
+	m.history = m.history[:m.turnStartIdx]
+	for _, blk := range turn.Blocks {
+		m.history = append(m.history, m.cardFromBlock(blk))
+	}
+	m.liveBlocks = nil
+}
+
+func (m *model) cardFromBlock(blk agent.Block) card {
+	c := card{
+		Kind: cardKindFor(blk.Kind),
+		ID:   blk.ID,
+		Text: blk.Text,
+		At:   m.started,
+	}
+	switch blk.Kind {
+	case agent.BlockToolCall:
+		c.Text = blk.Arguments
+		c.Title = blk.Name
+	case agent.BlockReasoning, agent.BlockReasoningSummary:
+		c.Expanded = m.expandReasoning
+	}
+	return c
+}
+
+func cardKindFor(k agent.BlockKind) cardKind {
+	switch k {
+	case agent.BlockReasoning:
+		return cardReasoning
+	case agent.BlockReasoningSummary:
+		return cardSummary
+	case agent.BlockToolCall:
+		return cardTool
+	default:
+		return cardAssistant
+	}
 }
 
 // handleTurnResult reconciles the command's return value with the event stream.
@@ -310,15 +355,7 @@ func (m model) handleTurnResult(res turnResult) (tea.Model, tea.Cmd) {
 		m.err = res.Err
 		m.appendCard(card{Kind: cardError, Text: res.Err.Error(), At: time.Now()})
 	} else {
-		if c := m.liveCard(cardReasoning); c != nil {
-			c.Text = res.Result.Reasoning
-			c.Live = false
-			c.Expanded = m.expandReasoning
-		}
-		if c := m.liveCard(cardAssistant); c != nil {
-			c.Text = res.Result.Output
-			c.Live = false
-		}
+		m.applyTurn(res.Result)
 	}
 	m.rebuild()
 	return m, nil
@@ -344,8 +381,7 @@ func (m model) submit() (tea.Model, tea.Cmd) {
 	// the user side of the view: echo it before clearing the input.
 	m.appendCard(card{Kind: cardUser, Text: text, At: time.Now()})
 	m.input.Reset()
-	m.reasoning = ""
-	m.output = ""
+	m.liveBlocks = nil
 	m.usage = llm.TokenUsage{}
 
 	m.turn++

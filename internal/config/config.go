@@ -18,11 +18,11 @@ type Config struct {
 }
 
 type ProviderConfig struct {
-	Name      string `json:"name"` // "openai" | "anthropic" | "deepseek" ...
-	APIKey    string `json:"apiKey"`
-	BaseURL   string `json:"baseUrl"`
-	Model     string `json:"model"`
-	MaxTokens int    `json:"maxTokens,omitempty"`
+	Name            string `json:"name"` // "openai" | "anthropic" | "deepseek" ...
+	APIKey          string `json:"apiKey"`
+	BaseURL         string `json:"baseUrl"`
+	Model           string `json:"model"`
+	MaxOutputTokens int    `json:"maxOutputTokens,omitempty"`
 }
 
 type AgentConfig struct {

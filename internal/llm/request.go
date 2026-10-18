@@ -33,8 +33,7 @@ type ToolCall struct {
 type ToolParamUnit struct {
 }
 
-// ToolSpec defines the info of a llm layer tools
-// it is needless to contain tools exec info
+// ToolSpec describes a tool the model may call (execution details excluded).
 type ToolSpec struct {
 	Name        string
 	Description string
@@ -75,15 +74,14 @@ func (u TokenUsage) CacheHitRate() float64 {
 	return rate
 }
 
-// Request is a complete request record for an LLM call,
-// and it is independent of the model provider and the api
+// Request is one provider-independent model call.
 type Request struct {
-	Model        string
-	Messages     []Message
-	Tools        []ToolSpec
-	SystemPrompt string
-	Temperature  float64
-	MaxTokens    int
+	Model           string
+	Messages        []Message
+	Tools           []ToolSpec
+	SystemPrompt    string
+	Temperature     float64
+	MaxOutputTokens int
 }
 
 type Streamer interface {

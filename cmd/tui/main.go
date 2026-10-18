@@ -6,15 +6,18 @@ import (
 	"context"
 	"errors"
 	"flag"
+	"fmt"
 	"log"
 	"os"
 	"os/signal"
+	"strings"
 	"syscall"
 
 	tea "charm.land/bubbletea/v2"
 
 	"winky/internal/agent"
 	"winky/internal/config"
+	"winky/internal/llm"
 	"winky/internal/llm/api"
 	"winky/internal/llm/model"
 	"winky/internal/tui"
@@ -23,6 +26,7 @@ import (
 func main() {
 	configPath := flag.String("config", "", "path to config.json (default: defaults + .env)")
 	catalogPath := flag.String("catalog", "catalog.json", "path to model catalog.json")
+	promptPath := flag.String("prompt", "", "path to a system prompt file (default: none)")
 	flag.Parse()
 
 	cfg, err := config.Load(*configPath)
@@ -48,17 +52,10 @@ func main() {
 		log.Fatalf("create llm streamer: %v", err)
 	}
 
-	maxTokens := cfg.Provider.MaxTokens
-	if maxTokens <= 0 {
-		maxTokens = config.DefaultMaxTokens
+	a, err := newAgent(streamer, cfg, *promptPath)
+	if err != nil {
+		log.Fatalf("create agent: %v", err)
 	}
-
-	a := agent.New(
-		streamer,
-		agent.WithModel(cfg.Provider.Model),
-		agent.WithTemperature(cfg.Agent.Temperature),
-		agent.WithMaxTokens(maxTokens),
-	)
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
@@ -70,4 +67,46 @@ func main() {
 		!errors.Is(err, tea.ErrProgramKilled) {
 		log.Fatalf("tui: %v", err)
 	}
+}
+
+// newAgent builds the conversational agent, loading the optional system prompt
+// file named on the command line; an empty or blank file means no prompt.
+//
+// The prompt is sent as model instructions on every turn. As the one stable
+// prefix the conversation always repeats, it is also what makes provider-side
+// prompt caching pay off: a short chat never reaches the minimum cacheable
+// prefix, and its cache rate then stays at "—" for the whole session.
+func newAgent(streamer llm.Streamer, cfg *config.Config, promptPath string) (*agent.Agent, error) {
+	maxOutputTokens := cfg.Provider.MaxOutputTokens
+	if maxOutputTokens <= 0 {
+		maxOutputTokens = config.DefaultMaxOutputTokens
+	}
+
+	opts := []agent.Option{
+		agent.WithModel(cfg.Provider.Model),
+		agent.WithTemperature(cfg.Agent.Temperature),
+		agent.WithMaxOutputTokens(maxOutputTokens),
+	}
+
+	if promptPath != "" {
+		prompt, err := readSystemPrompt(promptPath)
+		if err != nil {
+			return nil, err
+		}
+		if prompt != "" {
+			opts = append(opts, agent.WithSystemPrompt(prompt))
+		}
+	}
+
+	return agent.New(streamer, opts...), nil
+}
+
+// readSystemPrompt loads a system prompt file. Surrounding whitespace is
+// trimmed, so an empty or blank file means "no system prompt".
+func readSystemPrompt(path string) (string, error) {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return "", fmt.Errorf("read %s: %w", path, err)
+	}
+	return strings.TrimSpace(string(data)), nil
 }

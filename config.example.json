@@ -1,7 +1,8 @@
 {
   "provider": {
     "name": "deepseek",
-    "model": "deepseek-flash"
+    "model": "deepseek-flash",
+    "maxOutputTokens": 16384
   },
   "agent": {
     "maxTurns": 20,

@@ -51,8 +51,15 @@ func defaultKeyMap() keyMap {
 		Quit:       key.NewBinding(key.WithKeys("ctrl+c"), key.WithHelp("ctrl+c", "退出")),
 		ScrollUp:   key.NewBinding(key.WithKeys("pgup"), key.WithHelp("pgup", "上翻")),
 		ScrollDown: key.NewBinding(key.WithKeys("pgdown"), key.WithHelp("pgdn", "下翻")),
-		ToggleAll:  key.NewBinding(key.WithKeys("ctrl+t"), key.WithHelp("ctrl+t", "展开/折叠全部推理")),
+		ToggleAll:  key.NewBinding(key.WithKeys("ctrl+t"), key.WithHelp("ctrl+t", "展开/折叠全部思考")),
 	}
+}
+
+// blockKey identifies a live streaming block: its card kind plus its locating
+// ID (item_id for text blocks, call_id for tool blocks).
+type blockKey struct {
+	kind cardKind
+	id   string
 }
 
 type model struct {
@@ -73,16 +80,16 @@ type model struct {
 	vp    viewport.Model // scrollback of every card
 	sp    spinner.Model  // shown while a turn is streaming
 
-	// Session view state (in memory only for now).
+	// Session view state.
 	history         []card
-	hints           []hint // clickable lines (toggling a reasoning card)
+	hints           []hint // clickable lines (toggling a collapsible card)
 	follow          bool   // autoscroll while streaming
 	dirty           bool   // deltas pending a coalesced rebuild
 	turn            int
 	streaming       bool
-	cancelled       map[int]bool // turn ids cancelled by the user
-	reasoning       string       // accumulated ReasoningDelta of the live turn
-	output          string       // accumulated OutputDelta of the live turn
+	cancelled       map[int]bool     // turn ids cancelled by the user
+	liveBlocks      map[blockKey]int // blockKey -> history index of the live card
+	turnStartIdx    int              // history index where this turn's cards begin
 	expandReasoning bool
 
 	// Token usage: current turn and session total (zero TotalTokens = none).
@@ -148,8 +155,7 @@ func newModel(ag Agent, st Styles, label string, expandReasoning bool) model {
 	}
 }
 
-// Init focuses the input and arms the single event receiver. The pump goroutine
-// itself is started by Tui.Run, before the program starts.
+// Init focuses the input and arms the single event receiver.
 func (m model) Init() tea.Cmd {
 	return tea.Batch(
 		m.input.Focus(),
@@ -201,7 +207,6 @@ func (m *model) atBottom() bool {
 	return m.vp.YOffset() >= maxOffset
 }
 
-// finishTurn clears the per-turn streaming state.
 func (m *model) finishTurn() {
 	m.streaming = false
 	m.turnCanc = nil

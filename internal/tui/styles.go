@@ -11,6 +11,8 @@ type Styles struct {
 	Err       lipgloss.Style
 	User      lipgloss.Style
 	Reasoning lipgloss.Style
+	Summary   lipgloss.Style
+	Tool      lipgloss.Style
 	Hint      lipgloss.Style
 	Assistant lipgloss.Style
 }
@@ -22,18 +24,23 @@ func newStyles() Styles {
 		Err:       lipgloss.NewStyle().Foreground(lipgloss.Red),
 		User:      lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Cyan),
 		Reasoning: lipgloss.NewStyle().Faint(true).Italic(true),
+		Summary:   lipgloss.NewStyle().Faint(true).Italic(true).Foreground(lipgloss.Color("244")),
+		Tool:      lipgloss.NewStyle().Foreground(lipgloss.Color("178")),
 		Hint:      lipgloss.NewStyle().Faint(true).Foreground(lipgloss.BrightBlack),
 		Assistant: lipgloss.NewStyle().Foreground(lipgloss.Color("252")),
 	}
 }
 
-// head styles a card label line.
 func (s Styles) head(k cardKind) lipgloss.Style {
 	switch k {
 	case cardUser:
 		return s.User
 	case cardReasoning:
 		return s.Reasoning
+	case cardSummary:
+		return s.Summary
+	case cardTool:
+		return s.Tool
 	case cardError:
 		return s.Err
 	case cardNotice:
@@ -43,11 +50,14 @@ func (s Styles) head(k cardKind) lipgloss.Style {
 	}
 }
 
-// body styles a card body line.
 func (s Styles) body(k cardKind) lipgloss.Style {
 	switch k {
 	case cardReasoning:
 		return s.Reasoning
+	case cardSummary:
+		return s.Summary
+	case cardTool:
+		return s.Tool
 	case cardError:
 		return s.Err
 	case cardNotice:

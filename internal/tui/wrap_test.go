@@ -52,7 +52,7 @@ func TestLongOutputWrapsToViewportWidth(t *testing.T) {
 	m = feed(t, m,
 		AgentEvent{Event: agent.TurnStart{Timestamp: time.Now()}},
 		AgentEvent{Event: agent.OutputDelta{Text: long}},
-		AgentEvent{Event: agent.TurnEnd{Reasoning: "", Output: long}},
+		AgentEvent{Event: agent.TurnEnd{Turn: turnOf("", long)}},
 	)
 
 	width := m.vp.Width()

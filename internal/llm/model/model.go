@@ -41,14 +41,6 @@ func lookup(modelName string) (Model, error) {
 	}
 
 	for _, e := range catalog {
-		// if name == modelName {
-		// 	return Model{
-		// 		Provider: e.Provider,
-		// 		Name:     modelName,
-		// 		Protocol: e.Protocol,
-		// 	}, nil
-		// }
-
 		if e.Family != "" &&
 			strings.HasPrefix(modelName, e.Family) &&
 			len(e.Family) > len(bestFamily) {

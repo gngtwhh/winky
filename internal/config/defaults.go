@@ -6,7 +6,7 @@ import (
 )
 
 const (
-	DefaultMaxTokens int = 4096
+	DefaultMaxOutputTokens int = 16384
 
 	DefaultLogLevel string = "info"
 
@@ -21,7 +21,7 @@ func DefaultConfig() *Config {
 
 	return &Config{
 		Provider: ProviderConfig{
-			MaxTokens: DefaultMaxTokens,
+			MaxOutputTokens: DefaultMaxOutputTokens,
 		},
 		Agent: AgentConfig{
 			AgentDir:       path.Join(home, DefaultAgentDirBase),

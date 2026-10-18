@@ -11,12 +11,8 @@ import (
 const tickInterval = 80 * time.Millisecond
 
 // startPump launches the single goroutine that owns agent.Events(). The agent
-// writes to that channel with a blocking send, so it must always have a reader;
-// the pump is therefore started before the program runs and stopped only when
-// the context is cancelled.
-//
-// done is closed once the pump has returned, so Run can wait for it without
-// racing on the termination event.
+// writes to that channel with a blocking send, so the pump must start before the
+// program runs. done closes once the pump returns, letting Run wait for it.
 func startPump(ctx context.Context, ag Agent, out chan<- AgentEvent, done chan<- struct{}) {
 	go func() {
 		defer close(done)

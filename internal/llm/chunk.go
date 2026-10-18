@@ -2,20 +2,14 @@ package llm
 
 import "time"
 
+// Chunk is one semantic event emitted while streaming a single model response.
+// It is deliberately coarse: the full protocol result arrives once on
+// ResponseEnd rather than as item/part lifecycle events.
 type Chunk interface {
 	llmChunkType() string
 }
 
-// type StreamChunk struct {
-// 	Delta        string
-// 	ToolCall     *ToolCall
-// 	Usage        *TokenUsage
-// 	FinishReason string
-// 	Done         bool
-// }
-
-/* Agent Response */
-
+// Stop reasons for a response.
 const (
 	StopReasonDone       = "done"
 	StopReasonError      = "error"
@@ -24,115 +18,78 @@ const (
 	StopReasonUnknown    = "unknown"
 )
 
-type AgentStart struct{ Timestamp time.Time }
-type AgentEnd struct {
+// ResponseStart marks the beginning of one model response.
+type ResponseStart struct{ Timestamp time.Time }
+
+// ResponseEnd marks the end of one model response. Response carries the fully
+// accumulated result; it is nil when the response errored before producing
+// output.
+type ResponseEnd struct {
 	Timestamp  time.Time
 	StopReason string
 	Err        error
-	Usage      *TokenUsage
+	Response   *Response
 }
 
-/* Reasoning Item */
+// Text deltas carry ItemID so the live view can group fragments into the same
+// item structure as Response.Output.
 
-type ReasoningItemAdd struct{ ItemID string }
-
-type ReasoningItemDone struct{ ItemID string }
-
-type ReasoningContentAdd struct{ ItemID string }
-type ReasoningContentDelta struct {
+// ReasoningDelta is a fragment of the model's reasoning text (reasoning_text).
+type ReasoningDelta struct {
 	ItemID string
-	Delta  string
+	Text   string
 }
 
-type ReasoningContentDone struct {
-	ItemID      string
-	FullContent string
-}
-
-/* Output Item */
-
-type OutputItemAdd struct{ ItemID string }
-
-type OutputItemDone struct{ ItemID string }
-
-type OutputContentAdd struct{ ItemID string }
-type OutputContentDelta struct {
+// ReasoningSummaryDelta is a fragment of the concise reasoning summary
+// (summary_text).
+type ReasoningSummaryDelta struct {
 	ItemID string
-	Delta  string
+	Text   string
 }
 
-type OutputContentDone struct {
-	ItemID      string
-	FullContent string
+// OutputDelta is a fragment of the assistant's answer text (output_text).
+type OutputDelta struct {
+	ItemID string
+	Text   string
 }
 
-/* Tool Call */
+// RefusalDelta is a fragment of a refusal (refusal).
+type RefusalDelta struct {
+	ItemID string
+	Text   string
+}
 
-type ToolCallStart struct{ ID, Name string }
+// ToolCallStart announces a function tool call. CallID is the call_id used to
+// round-trip the result as a function_call_output item. It is distinct from the
+// item_id carried by text deltas: call_id is what the provider expects back.
+type ToolCallStart struct {
+	CallID string
+	Name   string
+}
+
+// ToolCallArgsDelta carries a partial argument fragment for a tool call. CallID
+// matches ToolCallStart.CallID.
 type ToolCallArgsDelta struct {
-	ID        string
+	CallID string
+	Delta  string
+}
+
+// ToolCallEnd carries the authoritative complete arguments for a tool call.
+type ToolCallEnd struct {
+	CallID    string
 	Arguments string
 }
-type ToolCallEnd struct{ ID, Arguments string } // 或直接给重组后的完整 ToolCall
 
+// UnknownChunk carries a raw event the adapter did not map. Debug only.
 type UnknownChunk struct{ Raw string }
 
-func (c AgentStart) llmChunkType() string {
-	return "agent_start"
-}
-
-func (c AgentEnd) llmChunkType() string {
-	return "agent_end"
-}
-func (c ReasoningItemAdd) llmChunkType() string {
-	return "reasoning_item_add"
-}
-
-func (c ReasoningItemDone) llmChunkType() string {
-	return "reasoning_item_done"
-}
-
-func (c ReasoningContentAdd) llmChunkType() string {
-	return "reasoning_content_add"
-}
-
-func (c ReasoningContentDelta) llmChunkType() string {
-	return "reasoning_content_delta"
-}
-
-func (c ReasoningContentDone) llmChunkType() string {
-	return "reasoning_content_done"
-}
-
-func (c OutputItemAdd) llmChunkType() string {
-	return "output_item_add"
-}
-func (c OutputItemDone) llmChunkType() string {
-	return "output_item_done"
-}
-
-func (c OutputContentAdd) llmChunkType() string {
-	return "output_content_add"
-}
-func (c OutputContentDelta) llmChunkType() string {
-	return "output_content_delta"
-}
-func (c OutputContentDone) llmChunkType() string {
-	return "output_content_done"
-}
-
-func (c ToolCallStart) llmChunkType() string {
-	return "tool_call_start"
-}
-
-func (c ToolCallArgsDelta) llmChunkType() string {
-	return "tool_call_args_delta"
-}
-
-func (c ToolCallEnd) llmChunkType() string {
-	return "tool_call_end"
-}
-
-func (c UnknownChunk) llmChunkType() string {
-	return "unknown_chunk"
-}
+func (ResponseStart) llmChunkType() string         { return "response_start" }
+func (ResponseEnd) llmChunkType() string           { return "response_end" }
+func (ReasoningDelta) llmChunkType() string        { return "reasoning_delta" }
+func (ReasoningSummaryDelta) llmChunkType() string { return "reasoning_summary_delta" }
+func (OutputDelta) llmChunkType() string           { return "output_delta" }
+func (RefusalDelta) llmChunkType() string          { return "refusal_delta" }
+func (ToolCallStart) llmChunkType() string         { return "tool_call_start" }
+func (ToolCallArgsDelta) llmChunkType() string     { return "tool_call_args_delta" }
+func (ToolCallEnd) llmChunkType() string           { return "tool_call_end" }
+func (UnknownChunk) llmChunkType() string          { return "unknown_chunk" }

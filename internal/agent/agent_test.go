@@ -38,21 +38,41 @@ func usage(in, out, total, cached int) *llm.TokenUsage {
 	}
 }
 
+// messageItem builds a message output item carrying the given text.
+func messageItem(id, text string) llm.OutputItem {
+	return llm.OutputItem{
+		Type: llm.ItemMessage,
+		ID:   id,
+		Content: []llm.ContentPart{
+			{Type: llm.PartOutputText, Text: text},
+		},
+	}
+}
+
 // Each successful Turn emits exactly TurnStart, one delta per chunk, and
 // TurnEnd, so reading three events reaches the terminal event.
 func TestTurnEndCarriesUsage(t *testing.T) {
 	ag := New(&fakeStreamer{chunks: []llm.Chunk{
-		llm.AgentStart{},
-		llm.OutputContentDelta{Delta: "hi"},
-		llm.AgentEnd{StopReason: llm.StopReasonDone, Usage: usage(31, 31, 62, 0)},
+		llm.ResponseStart{},
+		llm.OutputDelta{ItemID: "msg_1", Text: "hi"},
+		llm.ResponseEnd{
+			StopReason: llm.StopReasonDone,
+			Response: &llm.Response{
+				Output: []llm.OutputItem{messageItem("msg_1", "hi")},
+				Usage:  usage(31, 31, 62, 0),
+			},
+		},
 	}})
 
 	res, err := ag.Turn(context.Background(), "hi")
 	if err != nil {
 		t.Fatalf("Turn: %v", err)
 	}
-	if res.Output != "hi" {
-		t.Fatalf("output = %q, want %q", res.Output, "hi")
+	if res.Output() != "hi" {
+		t.Fatalf("output = %q, want %q", res.Output(), "hi")
+	}
+	if len(res.Blocks) != 1 || res.Blocks[0].Kind != BlockMessage {
+		t.Fatalf("blocks = %+v, want one message block", res.Blocks)
 	}
 
 	var end TurnEnd
@@ -75,9 +95,14 @@ func TestTurnEndCarriesUsage(t *testing.T) {
 // A failed turn still records the usage the provider reported before failing.
 func TestTurnFailedCarriesUsage(t *testing.T) {
 	ag := New(&fakeStreamer{chunks: []llm.Chunk{
-		llm.AgentStart{},
-		llm.OutputContentDelta{Delta: "partial"},
-		llm.AgentEnd{StopReason: llm.StopReasonIncomplete, Usage: usage(20, 10, 30, 0)},
+		llm.ResponseStart{},
+		llm.OutputDelta{Text: "partial"},
+		llm.ResponseEnd{
+			StopReason: llm.StopReasonIncomplete,
+			Response: &llm.Response{
+				Usage: usage(20, 10, 30, 0),
+			},
+		},
 	}})
 
 	if _, err := ag.Turn(context.Background(), "hi"); err == nil {

@@ -34,6 +34,8 @@ func TestFormatUsage(t *testing.T) {
 	}{
 		{"none", llm.TokenUsage{}, "—"},
 		{"full", llm.TokenUsage{PromptTokens: 1000, CompletionTokens: 500, TotalTokens: 1500, CachedTokens: 500}, "↑1.0k ↓500 · Cache 50%"},
+		{"cached zero", llm.TokenUsage{PromptTokens: 1000, CompletionTokens: 500, TotalTokens: 1500}, "↑1.0k ↓500 · Cache —"},
+		{"tiny hit", llm.TokenUsage{PromptTokens: 100000, CompletionTokens: 10, TotalTokens: 100010, CachedTokens: 1}, "↑100.0k ↓10 · Cache 1%"},
 		{"no input", llm.TokenUsage{PromptTokens: 0, CompletionTokens: 10, TotalTokens: 10}, "↑0 ↓10"},
 	}
 	for _, tc := range cases {

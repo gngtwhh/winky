@@ -12,7 +12,7 @@ import (
 	"github.com/openai/openai-go/v3/shared"
 )
 
-// ResponsesProtocol holds an OpenAI API client and implements the llm.Streamer interface
+// ResponsesProtocol implements llm.Streamer over the Responses API.
 type ResponsesProtocol struct {
 	client *openai.Client
 }
@@ -48,12 +48,18 @@ func (*ResponsesProtocol) Name() string {
 	return "openai-responses"
 }
 
+// consumeResponsesStream translates Responses SSE events into semantic
+// llm.Chunk values. The authoritative result is accumulated by the terminal
+// event and delivered on ResponseEnd.
 func consumeResponsesStream(
 	ctx context.Context,
 	stream *ssestream.Stream[responses.ResponseStreamEventUnion],
 	ch chan<- llm.Chunk,
 ) {
-	// hasFuncCall := false
+	// itemID -> call_id for function calls: the arguments delta/done events are
+	// keyed by item_id while the round-trip needs call_id.
+	toolCallIDs := make(map[string]string)
+
 	for stream.Next() {
 		select {
 		case <-ctx.Done():
@@ -63,172 +69,98 @@ func consumeResponsesStream(
 
 		event := stream.Current()
 
-		type currentItem struct {
-			id       string
-			itemType string
-		}
-		var curItem currentItem
-
 		switch e := event.AsAny().(type) {
-		// AgentStart
+		// Lifecycle.
 		case responses.ResponseCreatedEvent:
-			ch <- llm.AgentStart{Timestamp: time.Now()}
-		// AgentEnd
+			ch <- llm.ResponseStart{Timestamp: time.Now()}
+
 		case responses.ResponseCompletedEvent:
-			ch <- llm.AgentEnd{
+			ch <- llm.ResponseEnd{
 				Timestamp:  time.Now(),
 				StopReason: llm.StopReasonDone,
-				Usage:      toTokenUsage(e.Response.Usage),
+				Response:   buildResponse(e.Response),
 			}
 			return
+
 		case responses.ResponseFailedEvent:
-			ch <- llm.AgentEnd{
+			ch <- llm.ResponseEnd{
 				Timestamp:  time.Now(),
 				StopReason: llm.StopReasonFailed,
-				Usage:      toTokenUsage(e.Response.Usage),
+				Response:   buildResponse(e.Response),
 			}
 			return
+
 		case responses.ResponseErrorEvent:
-			ch <- llm.AgentEnd{
+			ch <- llm.ResponseEnd{
 				Timestamp:  time.Now(),
 				StopReason: llm.StopReasonError,
 				Err:        fmt.Errorf("errcode=%q,errmsg=%q", e.Code, e.Message),
 			}
 			return
+
 		case responses.ResponseIncompleteEvent:
-			ch <- llm.AgentEnd{
+			ch <- llm.ResponseEnd{
 				Timestamp:  time.Now(),
 				StopReason: llm.StopReasonIncomplete,
-				Usage:      toTokenUsage(e.Response.Usage),
+				Response:   buildResponse(e.Response),
 			}
 			return
-		// Item
+
+		// Function tool call: item_id-keyed events resolve to the item's call_id.
 		case responses.ResponseOutputItemAddedEvent:
-			curItem.id = e.Item.ID
-			curItem.itemType = e.Item.Type
-			if e.Item.Type == "reasoning" {
-				ch <- llm.ReasoningItemAdd{
-					ItemID: e.Item.ID,
-				}
-			} else if e.Item.Type == "message" {
-				ch <- llm.OutputItemAdd{
-					ItemID: e.Item.ID,
-				}
-			}
-		case responses.ResponseOutputItemDoneEvent:
-			if e.Item.Type == "reasoning" {
-				ch <- llm.ReasoningItemDone{
-					ItemID: e.Item.ID,
-				}
-			} else if e.Item.Type == "message" {
-				ch <- llm.OutputItemDone{
-					ItemID: e.Item.ID,
-				}
-			}
-		// Content
-		case responses.ResponseContentPartAddedEvent:
-			// TODO: should use first "ResponseReasoningTextDeltaEvent" to record?
-			if curItem.itemType == "reasoning" {
-				ch <- llm.ReasoningContentAdd{
-					ItemID: curItem.id,
-				}
-			} else if curItem.itemType == "message" {
-				ch <- llm.OutputContentAdd{
-					ItemID: curItem.id,
-				}
-			}
-		case responses.ResponseContentPartDoneEvent:
-		// Reasoning
-		case responses.ResponseReasoningTextDeltaEvent:
-			ch <- llm.ReasoningContentDelta{
-				ItemID: e.ItemID,
-				Delta:  e.Delta,
-			}
-		case responses.ResponseReasoningTextDoneEvent:
-			ch <- llm.ReasoningContentDone{
-				ItemID:      e.ItemID,
-				FullContent: e.Text,
-			}
-		// Output
-		case responses.ResponseTextDeltaEvent:
-			ch <- llm.OutputContentDelta{
-				ItemID: e.ItemID,
-				Delta:  e.Delta,
-			}
-		case responses.ResponseTextDoneEvent:
-			ch <- llm.OutputContentDone{
-				ItemID:      e.ItemID,
-				FullContent: e.Text,
+			if e.Item.Type == "function_call" {
+				f := e.Item.AsFunctionCall()
+				toolCallIDs[e.Item.ID] = f.CallID
+				ch <- llm.ToolCallStart{CallID: f.CallID, Name: f.Name}
 			}
 
-		case responses.ResponseInProgressEvent:
-
-		case responses.ResponseAudioDeltaEvent:
-		case responses.ResponseAudioDoneEvent:
-		case responses.ResponseAudioTranscriptDeltaEvent:
-		case responses.ResponseAudioTranscriptDoneEvent:
-
-		case responses.ResponseCodeInterpreterCallCodeDeltaEvent:
-		case responses.ResponseCodeInterpreterCallCodeDoneEvent:
-		case responses.ResponseCodeInterpreterCallCompletedEvent:
-		case responses.ResponseCodeInterpreterCallInProgressEvent:
-		case responses.ResponseCodeInterpreterCallInterpretingEvent:
-
-		case responses.ResponseCompactionCompactingEvent:
-
-		case responses.ResponseFileSearchCallCompletedEvent:
-		case responses.ResponseFileSearchCallInProgressEvent:
-		case responses.ResponseFileSearchCallSearchingEvent:
 		case responses.ResponseFunctionCallArgumentsDeltaEvent:
-		case responses.ResponseFunctionCallArgumentsDoneEvent:
-		case responses.ResponseShellCallCommandAddedEvent:
-		case responses.ResponseShellCallCommandDeltaEvent:
-		case responses.ResponseShellCallCommandDoneEvent:
-		case responses.ResponseShellCallOutputContentDeltaEvent:
-		case responses.ResponseShellCallOutputContentDoneEvent:
+			ch <- llm.ToolCallArgsDelta{
+				CallID: toolCallID(toolCallIDs, e.ItemID),
+				Delta:  e.Delta,
+			}
 
-		case responses.ResponseReasoningSummaryPartAddedEvent:
-		case responses.ResponseReasoningSummaryPartDoneEvent:
+		case responses.ResponseFunctionCallArgumentsDoneEvent:
+			ch <- llm.ToolCallEnd{
+				CallID:    toolCallID(toolCallIDs, e.ItemID),
+				Arguments: e.Arguments,
+			}
+
+		// Text deltas. Part order is surfaced by the terminal Response; the
+		// content_index / summary_index carried here are not needed.
+		case responses.ResponseReasoningTextDeltaEvent:
+			ch <- llm.ReasoningDelta{ItemID: e.ItemID, Text: e.Delta}
+
 		case responses.ResponseReasoningSummaryTextDeltaEvent:
-		case responses.ResponseReasoningSummaryTextDoneEvent:
+			ch <- llm.ReasoningSummaryDelta{ItemID: e.ItemID, Text: e.Delta}
+
+		case responses.ResponseTextDeltaEvent:
+			ch <- llm.OutputDelta{ItemID: e.ItemID, Text: e.Delta}
 
 		case responses.ResponseRefusalDeltaEvent:
-		case responses.ResponseRefusalDoneEvent:
+			ch <- llm.RefusalDelta{ItemID: e.ItemID, Text: e.Delta}
 
-		case responses.ResponseWebSearchCallCompletedEvent:
-		case responses.ResponseWebSearchCallInProgressEvent:
-		case responses.ResponseWebSearchCallSearchingEvent:
-		case responses.ResponseImageGenCallCompletedEvent:
-		case responses.ResponseImageGenCallGeneratingEvent:
-		case responses.ResponseImageGenCallInProgressEvent:
-		case responses.ResponseImageGenCallPartialImageEvent:
-		case responses.ResponseMcpCallArgumentsDeltaEvent:
-		case responses.ResponseMcpCallArgumentsDoneEvent:
-		case responses.ResponseMcpCallCompletedEvent:
-		case responses.ResponseMcpCallFailedEvent:
-		case responses.ResponseMcpCallInProgressEvent:
-		case responses.ResponseMcpListToolsCompletedEvent:
-		case responses.ResponseMcpListToolsFailedEvent:
-		case responses.ResponseMcpListToolsInProgressEvent:
-		case responses.ResponseOutputTextAnnotationAddedEvent:
-		case responses.ResponseQueuedEvent:
-		case responses.ResponseCustomToolCallInputDeltaEvent:
-		case responses.ResponseCustomToolCallInputDoneEvent:
+		// Authoritative done events; their data already rides the terminal
+		// response.
+		case responses.ResponseOutputItemDoneEvent,
+			responses.ResponseContentPartAddedEvent,
+			responses.ResponseContentPartDoneEvent,
+			responses.ResponseReasoningTextDoneEvent,
+			responses.ResponseReasoningSummaryTextDoneEvent,
+			responses.ResponseTextDoneEvent,
+			responses.ResponseRefusalDoneEvent:
+			// intentionally empty
+
+		// Everything else (hosted tools, audio, queued, compaction, mcp, ...) is
+		// intentionally ignored until a specific tool type is supported.
 		default:
-			ch <- llm.AgentEnd{
-				Timestamp:  time.Now(),
-				StopReason: llm.StopReasonError,
-				Err:        fmt.Errorf("AgentError: unknown response type: %T", e),
-			}
+			// debug only:
+			// ch <- llm.UnknownChunk{Raw: event.RawJSON()}
 		}
-		// just for debug
-		// ch <- llm.UnknownChunk{
-		// 	Raw: event.RawJSON(),
-		// }
 	}
 
 	if err := stream.Err(); err != nil {
-		ch <- llm.AgentEnd{
+		ch <- llm.ResponseEnd{
 			Timestamp:  time.Now(),
 			StopReason: llm.StopReasonError,
 			Err:        fmt.Errorf("OpenAIStreamError: %w", err),
@@ -236,24 +168,104 @@ func consumeResponsesStream(
 		return
 	}
 
-	//
-	ch <- llm.AgentEnd{
+	ch <- llm.ResponseEnd{
 		Timestamp:  time.Now(),
 		StopReason: llm.StopReasonUnknown,
 	}
 }
 
+// toolCallID resolves an item_id to its call_id, falling back to the item_id
+// when the function_call item was not observed.
+func toolCallID(m map[string]string, itemID string) string {
+	if id := m[itemID]; id != "" {
+		return id
+	}
+	return itemID
+}
+
+// buildResponse converts a terminal provider response into the llm.Response.
+func buildResponse(r responses.Response) *llm.Response {
+	out := &llm.Response{
+		ID:    r.ID,
+		Usage: toTokenUsage(r.Usage),
+	}
+	for _, item := range r.Output {
+		out.Output = append(out.Output, convertOutputItem(item))
+	}
+	return out
+}
+
+func convertOutputItem(u responses.ResponseOutputItemUnion) llm.OutputItem {
+	out := llm.OutputItem{
+		Type:   llm.ItemType(u.Type),
+		ID:     u.ID,
+		Status: u.Status,
+		Raw:    u.RawJSON(),
+	}
+
+	switch u.Type {
+	case "message":
+		m := u.AsMessage()
+		out.Phase = string(m.Phase)
+		for _, p := range m.Content {
+			part := llm.ContentPart{Type: llm.PartType(p.Type)}
+			switch p.Type {
+			case "output_text":
+				part.Text = p.AsOutputText().Text
+			case "refusal":
+				part.Text = p.AsRefusal().Refusal
+			}
+			out.Content = append(out.Content, part)
+		}
+
+	case "reasoning":
+		r := u.AsReasoning()
+		out.EncryptedContent = r.EncryptedContent
+		for _, p := range r.Content {
+			out.Content = append(
+				out.Content, llm.ContentPart{
+					Type: llm.PartReasoningText,
+					Text: p.Text,
+				},
+			)
+		}
+		for _, p := range r.Summary {
+			out.Summary = append(
+				out.Summary, llm.ContentPart{
+					Type: llm.PartReasoningSummary,
+					Text: p.Text,
+				},
+			)
+		}
+
+	case "function_call":
+		f := u.AsFunctionCall()
+		out.CallID = f.CallID
+		out.Name = f.Name
+		out.Arguments = f.Arguments
+	}
+
+	return out
+}
+
 // toTokenUsage maps a provider usage struct to the shared llm.TokenUsage.
-// It returns nil when the provider reported no usage: a real completed turn
-// always consumes at least one input token, so TotalTokens == 0 means absent.
+//
+// It returns nil only when nothing at all was reported: keying the check off
+// total_tokens alone would drop the whole record (including the cache
+// breakdown) for gateways that omit it. A missing total is derived from
+// input+output, since downstream code treats a zero TotalTokens as "no usage".
 func toTokenUsage(u responses.ResponseUsage) *llm.TokenUsage {
-	if u.TotalTokens == 0 {
+	if u.InputTokens == 0 && u.OutputTokens == 0 && u.TotalTokens == 0 {
 		return nil
+	}
+	total := int(u.TotalTokens)
+	if total == 0 {
+		total = int(u.InputTokens + u.OutputTokens)
 	}
 	return &llm.TokenUsage{
 		PromptTokens:     int(u.InputTokens),
 		CompletionTokens: int(u.OutputTokens),
-		TotalTokens:      int(u.TotalTokens),
+		TotalTokens:      total,
 		CachedTokens:     int(u.InputTokensDetails.CachedTokens),
 	}
 }
@@ -282,8 +294,8 @@ func buildResponsesParams(req llm.Request) (responses.ResponseNewParams, error) 
 	if req.Temperature != 0 {
 		params.Temperature = openai.Float(req.Temperature)
 	}
-	if req.MaxTokens > 0 {
-		params.MaxOutputTokens = openai.Int(int64(req.MaxTokens))
+	if req.MaxOutputTokens > 0 {
+		params.MaxOutputTokens = openai.Int(int64(req.MaxOutputTokens))
 	}
 
 	return params, nil
@@ -349,71 +361,4 @@ func convertToolsToParams(specs []llm.ToolSpec) []responses.ToolUnionParam {
 		tools[i] = tool
 	}
 	return tools
-}
-
-func docDontCallThis() {
-	var event responses.ResponseStreamEventUnion
-	switch v := event.AsAny().(type) {
-	case responses.ResponseAudioDeltaEvent:
-	case responses.ResponseAudioDoneEvent:
-	case responses.ResponseAudioTranscriptDeltaEvent:
-	case responses.ResponseAudioTranscriptDoneEvent:
-	case responses.ResponseCodeInterpreterCallCodeDeltaEvent:
-	case responses.ResponseCodeInterpreterCallCodeDoneEvent:
-	case responses.ResponseCodeInterpreterCallCompletedEvent:
-	case responses.ResponseCodeInterpreterCallInProgressEvent:
-	case responses.ResponseCodeInterpreterCallInterpretingEvent:
-	case responses.ResponseCompactionCompactingEvent:
-	case responses.ResponseCompletedEvent:
-	case responses.ResponseContentPartAddedEvent:
-	case responses.ResponseContentPartDoneEvent:
-	case responses.ResponseCreatedEvent:
-	case responses.ResponseErrorEvent:
-	case responses.ResponseFileSearchCallCompletedEvent:
-	case responses.ResponseFileSearchCallInProgressEvent:
-	case responses.ResponseFileSearchCallSearchingEvent:
-	case responses.ResponseFunctionCallArgumentsDeltaEvent:
-	case responses.ResponseFunctionCallArgumentsDoneEvent:
-	case responses.ResponseShellCallCommandAddedEvent:
-	case responses.ResponseShellCallCommandDeltaEvent:
-	case responses.ResponseShellCallCommandDoneEvent:
-	case responses.ResponseShellCallOutputContentDeltaEvent:
-	case responses.ResponseShellCallOutputContentDoneEvent:
-	case responses.ResponseInProgressEvent:
-	case responses.ResponseFailedEvent:
-	case responses.ResponseIncompleteEvent:
-	case responses.ResponseOutputItemAddedEvent:
-	case responses.ResponseOutputItemDoneEvent:
-	case responses.ResponseReasoningSummaryPartAddedEvent:
-	case responses.ResponseReasoningSummaryPartDoneEvent:
-	case responses.ResponseReasoningSummaryTextDeltaEvent:
-	case responses.ResponseReasoningSummaryTextDoneEvent:
-	case responses.ResponseReasoningTextDeltaEvent:
-	case responses.ResponseReasoningTextDoneEvent:
-	case responses.ResponseRefusalDeltaEvent:
-	case responses.ResponseRefusalDoneEvent:
-	case responses.ResponseTextDeltaEvent:
-	case responses.ResponseTextDoneEvent:
-	case responses.ResponseWebSearchCallCompletedEvent:
-	case responses.ResponseWebSearchCallInProgressEvent:
-	case responses.ResponseWebSearchCallSearchingEvent:
-	case responses.ResponseImageGenCallCompletedEvent:
-	case responses.ResponseImageGenCallGeneratingEvent:
-	case responses.ResponseImageGenCallInProgressEvent:
-	case responses.ResponseImageGenCallPartialImageEvent:
-	case responses.ResponseMcpCallArgumentsDeltaEvent:
-	case responses.ResponseMcpCallArgumentsDoneEvent:
-	case responses.ResponseMcpCallCompletedEvent:
-	case responses.ResponseMcpCallFailedEvent:
-	case responses.ResponseMcpCallInProgressEvent:
-	case responses.ResponseMcpListToolsCompletedEvent:
-	case responses.ResponseMcpListToolsFailedEvent:
-	case responses.ResponseMcpListToolsInProgressEvent:
-	case responses.ResponseOutputTextAnnotationAddedEvent:
-	case responses.ResponseQueuedEvent:
-	case responses.ResponseCustomToolCallInputDeltaEvent:
-	case responses.ResponseCustomToolCallInputDoneEvent:
-	default:
-		fmt.Println(v)
-	}
 }

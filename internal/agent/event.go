@@ -14,22 +14,48 @@ type TurnStart struct {
 	Timestamp time.Time
 }
 
-// ReasoningDelta carries a piece of the model's reasoning text.
+// ReasoningDelta carries a piece of reasoning text. ItemID locates the block
+// the delta belongs to.
 type ReasoningDelta struct {
-	Text string
+	ItemID string
+	Text   string
 }
 
-// OutputDelta carries a piece of the model's output text.
+// ReasoningSummaryDelta carries a piece of the concise reasoning summary.
+type ReasoningSummaryDelta struct {
+	ItemID string
+	Text   string
+}
+
+// OutputDelta carries a piece of assistant message text.
 type OutputDelta struct {
-	Text string
+	ItemID string
+	Text   string
 }
 
-// TurnEnd marks a successfully completed turn and carries the full reasoning
-// and output text, plus this turn's usage and the session total. A zero
-// Usage.TotalTokens means the provider reported no usage.
+// ToolCallStart announces a tool call. CallID locates the call.
+type ToolCallStart struct {
+	CallID string
+	Name   string
+}
+
+// ToolCallArgsDelta carries a partial argument fragment.
+type ToolCallArgsDelta struct {
+	CallID string
+	Delta  string
+}
+
+// ToolCallEnd carries the complete arguments for a tool call.
+type ToolCallEnd struct {
+	CallID    string
+	Arguments string
+}
+
+// TurnEnd marks a successfully completed turn and carries the assembled Turn,
+// plus this turn's usage and the session total. A zero Usage.TotalTokens means
+// the provider reported no usage.
 type TurnEnd struct {
-	Reasoning  string
-	Output     string
+	Turn       Turn
 	Usage      llm.TokenUsage
 	TotalUsage llm.TokenUsage
 }
@@ -44,6 +70,14 @@ type TurnFailed struct {
 
 func (TurnStart) agentEventType() string      { return "turn_start" }
 func (ReasoningDelta) agentEventType() string { return "reasoning_delta" }
-func (OutputDelta) agentEventType() string    { return "output_delta" }
-func (TurnEnd) agentEventType() string        { return "turn_end" }
-func (TurnFailed) agentEventType() string     { return "turn_failed" }
+func (ReasoningSummaryDelta) agentEventType() string {
+	return "reasoning_summary_delta"
+}
+func (OutputDelta) agentEventType() string   { return "output_delta" }
+func (ToolCallStart) agentEventType() string { return "tool_call_start" }
+func (ToolCallArgsDelta) agentEventType() string {
+	return "tool_call_args_delta"
+}
+func (ToolCallEnd) agentEventType() string { return "tool_call_end" }
+func (TurnEnd) agentEventType() string     { return "turn_end" }
+func (TurnFailed) agentEventType() string  { return "turn_failed" }
