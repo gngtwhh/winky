@@ -314,23 +314,22 @@ func convertMessagesToInput(msgs []llm.Message) (responses.ResponseNewParamsInpu
 			)
 
 		case llm.RoleAssistant:
-			if len(m.ToolCalls) > 0 {
-				for _, tc := range m.ToolCalls {
-					items = append(
-						items, responses.ResponseInputItemUnionParam{
-							OfFunctionCall: &responses.ResponseFunctionToolCallParam{
-								CallID:    tc.ID,
-								Name:      tc.Name,
-								Arguments: tc.Arguments,
-							},
-						},
-					)
-				}
-			} else {
+			if m.Content != "" {
 				items = append(
 					items, responses.ResponseInputItemParamOfMessage(
 						m.Content, responses.EasyInputMessageRoleAssistant,
 					),
+				)
+			}
+			for _, tc := range m.ToolCalls {
+				items = append(
+					items, responses.ResponseInputItemUnionParam{
+						OfFunctionCall: &responses.ResponseFunctionToolCallParam{
+							CallID:    tc.ID,
+							Name:      tc.Name,
+							Arguments: tc.Arguments,
+						},
+					},
 				)
 			}
 

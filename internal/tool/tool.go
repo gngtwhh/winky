@@ -74,6 +74,17 @@ func (f *funcTool[T]) Invoke(ctx context.Context, call Call) (Result, error) {
 	return f.fn(ctx, args)
 }
 
+// Sequenced marks a tool whose calls must run one at a time, in issue order,
+// rather than concurrently with sibling calls in the same step.
+type Sequenced interface{ Sequential() bool }
+
+// sequenced wraps a tool to mark it sequential.
+func sequenced(t Tool) Tool { return sequencedTool{t} }
+
+type sequencedTool struct{ Tool }
+
+func (sequencedTool) Sequential() bool { return true }
+
 // decodeArgs decodes a call's raw JSON arguments into T. Empty arguments (a tool
 // that takes none) and an explicit null both decode to the zero value.
 func decodeArgs[T any](call Call) (T, error) {
@@ -82,7 +93,6 @@ func decodeArgs[T any](call Call) (T, error) {
 	if raw == "" || raw == "null" {
 		return args, nil
 	}
-	// TODO: A more precise type mismatch error message?
 	if err := json.Unmarshal([]byte(raw), &args); err != nil {
 		return args, fmt.Errorf("invalid arguments for tool %q: %w", call.Name, err)
 	}

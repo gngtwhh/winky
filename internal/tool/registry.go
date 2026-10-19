@@ -118,6 +118,16 @@ func (r *Registry) Specs() []llm.ToolSpec {
 	return out
 }
 
+// Sequential reports whether the named tool must run alone, in issue order.
+func (r *Registry) Sequential(name string) bool {
+	t, ok := r.Lookup(name)
+	if !ok {
+		return false
+	}
+	s, ok := t.(Sequenced)
+	return ok && s.Sequential()
+}
+
 // Run executes one call and never fails the agent loop.
 //
 // Every failure mode is folded into a Result the model can read and correct: an

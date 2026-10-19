@@ -53,7 +53,7 @@ func TestNewAgentSendsSystemPrompt(t *testing.T) {
 	path := writePrompt(t, "\n  You are winky. Keep answers short.  \n")
 	rs := &recordingStreamer{}
 
-	a, err := newAgent(rs, testConfig(), path)
+	a, err := newAgent(rs, testConfig(), path, nil)
 	if err != nil {
 		t.Fatalf("newAgent: %v", err)
 	}
@@ -80,7 +80,7 @@ func TestNewAgentSendsSystemPrompt(t *testing.T) {
 // empty instructions block.
 func TestNewAgentWithoutPromptPath(t *testing.T) {
 	rs := &recordingStreamer{}
-	a, err := newAgent(rs, testConfig(), "")
+	a, err := newAgent(rs, testConfig(), "", nil)
 	if err != nil {
 		t.Fatalf("newAgent: %v", err)
 	}
@@ -95,7 +95,7 @@ func TestNewAgentWithoutPromptPath(t *testing.T) {
 func TestNewAgentBlankPromptFile(t *testing.T) {
 	path := writePrompt(t, " \n\t\n")
 	rs := &recordingStreamer{}
-	a, err := newAgent(rs, testConfig(), path)
+	a, err := newAgent(rs, testConfig(), path, nil)
 	if err != nil {
 		t.Fatalf("newAgent: %v", err)
 	}
@@ -109,7 +109,7 @@ func TestNewAgentBlankPromptFile(t *testing.T) {
 
 func TestNewAgentMissingPromptFile(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "absent.md")
-	if _, err := newAgent(&recordingStreamer{}, testConfig(), path); err == nil {
+	if _, err := newAgent(&recordingStreamer{}, testConfig(), path, nil); err == nil {
 		t.Fatal("newAgent with missing prompt file = nil error, want error")
 	}
 }

@@ -13,42 +13,31 @@ import (
 	"winky/internal/llm"
 )
 
-// Limits for the filesystem tools. They exist to keep one call from flooding the
-// conversation: everything a tool returns is re-sent to the model on every later
-// request.
+// Limits for the filesystem tools; tool output is re-sent to the model every
+// later request, so each call must stay small.
 const (
-	// defaultReadLines is how many lines read_file returns without a limit.
-	defaultReadLines = 2000
-	// maxReadLines caps an explicit limit, so a model cannot ask for a dump.
-	maxReadLines = 4000
-	// maxReadBytes refuses files too large to hold in memory for a text read.
-	maxReadBytes = 8 << 20 // 8 MiB
-	// maxLineBytes clips a single pathological line (minified JS, base64 blob).
-	maxLineBytes = 2000
-	// defaultListEntries is how many directory entries list_dir returns.
+	defaultReadLines   = 2000
+	maxReadLines       = 4000
+	maxReadBytes       = 8 << 20 // 8 MiB
+	maxLineBytes       = 2000
 	defaultListEntries = 500
-	// maxListEntries caps an explicit list limit.
-	maxListEntries = 5000
+	maxListEntries     = 5000
 )
-
-// errReadOnly is returned when a write tool is invoked on a read-only workspace.
-// The write tools are not registered in read-only mode; this is defense in depth.
-var errReadOnly = errors.New("workspace is read-only: writing is disabled")
 
 // FS is the filesystem tool set rooted at one directory.
 //
-// Every path argument is resolved against Root and rejected if it escapes, both
-// lexically and after resolving symlinks, so a model cannot read or write
-// outside the workspace. Writable=false keeps only the read-only tools.
+// Paths are resolved against Root and symlink-resolved; whether an operation is
+// allowed (including paths outside Root) is decided by Policy at call time.
 type FS struct {
-	// Root is the absolute, symlink-resolved workspace directory.
-	Root string
-	// Writable allows write_file and edit_file.
-	Writable bool
+	Root   string // absolute, symlink-resolved
+	Policy *Policy
 }
 
 // NewFS builds a filesystem tool set rooted at root. The directory must exist.
-func NewFS(root string, writable bool) (*FS, error) {
+func NewFS(root string, p *Policy) (*FS, error) {
+	if p == nil {
+		p = NewPolicy(WorkspaceWrite)
+	}
 	if strings.TrimSpace(root) == "" {
 		return nil, errors.New("tool: workspace root is required")
 	}
@@ -63,71 +52,59 @@ func NewFS(root string, writable bool) (*FS, error) {
 	if !info.IsDir() {
 		return nil, fmt.Errorf("tool: workspace %s is not a directory", abs)
 	}
-	// Resolve the root once so containment checks compare real paths: comparing
-	// a resolved child against an unresolved root would reject valid paths.
 	real, err := filepath.EvalSymlinks(abs)
 	if err != nil {
 		return nil, fmt.Errorf("tool: workspace %s: %w", abs, err)
 	}
-	return &FS{Root: real, Writable: writable}, nil
+	return &FS{Root: real, Policy: p}, nil
 }
 
-// Tools returns the tool set. Read-only workspaces expose read_file and
-// list_dir only; a model that cannot see write_file cannot waste a turn trying
-// to call it.
+// Tools returns the filesystem tools. Mutating tools are sequenced so two
+// concurrent edits to the same path cannot race.
 func (fs *FS) Tools() []Tool {
-	out := []Tool{fs.readFile(), fs.listDir()}
-	if fs.Writable {
-		out = append(out, fs.writeFile(), fs.editFile())
+	return []Tool{
+		fs.readFile(),
+		fs.listDir(),
+		sequenced(fs.writeFile()),
+		sequenced(fs.editFile()),
+		sequenced(fs.delete()),
+		fs.mkdir(),
 	}
-	return out
 }
 
-// requireWritable guards the mutating tools.
-func (fs *FS) requireWritable() error {
-	if !fs.Writable {
-		return errReadOnly
-	}
-	return nil
+// guard asks the policy to authorize one operation.
+func (fs *FS) guard(ctx context.Context, name string, a Access, target string, inside bool) error {
+	return fs.Policy.guard(ctx, Request{Tool: name, Access: a, Target: target, Inside: inside})
 }
 
-// resolve maps a tool path argument to an absolute path inside Root.
-//
-// Containment is checked twice: lexically on the cleaned path, then again after
-// resolving symlinks in the deepest existing ancestor. The second check is what
-// stops a symlinked directory from redirecting a write outside the workspace,
-// including for a path that does not exist yet.
-func (fs *FS) resolve(p string) (string, error) {
+// resolve maps a path argument to an absolute path. inside reports whether the
+// resolved path is within Root; escapes are not rejected here, only reported so
+// the caller can ask the policy.
+func (fs *FS) resolve(p string) (abs string, inside bool, err error) {
 	if strings.TrimSpace(p) == "" {
-		return "", errors.New("path is required")
+		return "", false, errors.New("path is required")
 	}
-	abs := p
+	abs = p
 	if !filepath.IsAbs(abs) {
 		abs = filepath.Join(fs.Root, abs)
 	}
 	abs = filepath.Clean(abs)
-	if !within(fs.Root, abs) {
-		return "", fmt.Errorf("path %q is outside the workspace", p)
-	}
 
 	real, err := realPath(abs)
 	if err != nil {
-		return "", err
+		return "", false, err
 	}
-	if !within(fs.Root, real) {
-		return "", fmt.Errorf("path %q resolves outside the workspace", p)
-	}
-	return real, nil
+	return real, within(fs.Root, real), nil
 }
 
-// display renders p relative to Root, so tool output carries workspace-relative
-// paths instead of absolute host paths.
+// display renders p relative to Root when it is inside, otherwise verbatim.
 func (fs *FS) display(p string) string {
-	rel, err := filepath.Rel(fs.Root, p)
-	if err != nil {
-		return p
+	if within(fs.Root, p) {
+		if rel, err := filepath.Rel(fs.Root, p); err == nil {
+			return filepath.ToSlash(rel)
+		}
 	}
-	return filepath.ToSlash(rel)
+	return filepath.ToSlash(p)
 }
 
 // within reports whether p is root or a descendant of it.
@@ -144,9 +121,9 @@ func within(root, p string) bool {
 		!filepath.IsAbs(rel)
 }
 
-// realPath resolves symlinks in the deepest ancestor of p that exists and
-// re-joins the part that does not, so a write target whose parent is a symlink is
-// judged by where the write would actually land.
+// realPath resolves symlinks in the deepest existing ancestor of p and re-joins
+// the part that does not, so a write target whose parent is a symlink is judged
+// by where the write would actually land.
 func realPath(p string) (string, error) {
 	rest := ""
 	cur := p
@@ -173,8 +150,8 @@ func realPath(p string) (string, error) {
 var (
 	readFileSpec = llm.ToolSpec{
 		Name: "read_file",
-		Description: "Read a text file from the workspace. Returns numbered " +
-			"lines; use it before edit_file so the replacement matches exactly.",
+		Description: "Read a text file. Returns numbered lines; use it before " +
+			"edit_file so the replacement matches exactly.",
 		Parameters: object(
 			map[string]any{
 				"path":   stringProp("File path relative to the workspace root."),
@@ -187,10 +164,8 @@ var (
 
 	writeFileSpec = llm.ToolSpec{
 		Name: "write_file",
-		Description: "Create or overwrite a file with the given content. Parent " +
-			"directories are created. Prefer edit_file for small changes to an " +
-			"existing file: rewriting a whole file costs tokens and loses the rest " +
-			"of its content.",
+		Description: "Create or overwrite a file. Parent directories are created. " +
+			"Prefer edit_file for small changes to an existing file.",
 		Parameters: object(
 			map[string]any{
 				"path":    stringProp("File path relative to the workspace root."),
@@ -202,9 +177,8 @@ var (
 
 	editFileSpec = llm.ToolSpec{
 		Name: "edit_file",
-		Description: "Replace an exact substring in an existing file. old_string " +
-			"must match exactly once unless replace_all is true; include enough " +
-			"surrounding context to make it unique.",
+		Description: "Replace an exact substring in a file. old_string must match " +
+			"exactly once unless replace_all is true; include enough context to be unique.",
 		Parameters: object(
 			map[string]any{
 				"path":        stringProp("File path relative to the workspace root."),
@@ -217,14 +191,36 @@ var (
 	}
 
 	listDirSpec = llm.ToolSpec{
-		Name: "list_dir",
-		Description: "List one directory of the workspace: subdirectories first, " +
-			"then files with their sizes. Use it to discover paths before reading.",
+		Name:        "list_dir",
+		Description: "List one directory: subdirectories first, then files with sizes.",
 		Parameters: object(
 			map[string]any{
 				"path":  stringProp(`Directory relative to the workspace root (default ".").`),
 				"limit": intProp("Maximum entries to return (default 500, max 5000).", 1, maxListEntries),
 			},
+		),
+	}
+
+	deleteSpec = llm.ToolSpec{
+		Name:        "delete",
+		Description: "Delete a file or directory. Non-empty directories need recursive=true.",
+		Parameters: object(
+			map[string]any{
+				"path":      stringProp("Path relative to the workspace root."),
+				"recursive": boolProp("Also delete a directory's contents."),
+			},
+			"path",
+		),
+	}
+
+	mkdirSpec = llm.ToolSpec{
+		Name:        "mkdir",
+		Description: "Create a directory (parents are created too).",
+		Parameters: object(
+			map[string]any{
+				"path": stringProp("Directory path relative to the workspace root."),
+			},
+			"path",
 		),
 	}
 )
@@ -240,11 +236,14 @@ func (fs *FS) readFile() Tool {
 		if err := ctx.Err(); err != nil {
 			return Result{}, err
 		}
-
-		path, err := fs.resolve(a.Path)
+		path, inside, err := fs.resolve(a.Path)
 		if err != nil {
 			return Result{}, err
 		}
+		if err := fs.guard(ctx, "read_file", AccessRead, fs.display(path), inside); err != nil {
+			return Result{}, err
+		}
+
 		info, err := os.Stat(path)
 		if err != nil {
 			return Result{}, err
@@ -283,8 +282,7 @@ func (fs *FS) readFile() Tool {
 		end := min(start+limit, len(lines))
 		if start == end {
 			return Result{Output: fmt.Sprintf(
-				"%s: no lines in range (file has %d lines)",
-				fs.display(path), len(lines),
+				"%s: no lines in range (file has %d lines)", fs.display(path), len(lines),
 			)}, nil
 		}
 
@@ -294,10 +292,7 @@ func (fs *FS) readFile() Tool {
 			fmt.Fprintf(&b, "%6d\t%s\n", i+1, clipLine(lines[i]))
 		}
 		if end < len(lines) {
-			fmt.Fprintf(
-				&b, "[%d more lines; continue with offset=%d]\n",
-				len(lines)-end, end+1,
-			)
+			fmt.Fprintf(&b, "[%d more lines; continue with offset=%d]\n", len(lines)-end, end+1)
 		}
 		return Result{Output: b.String()}, nil
 	})
@@ -313,14 +308,14 @@ func (fs *FS) writeFile() Tool {
 		if err := ctx.Err(); err != nil {
 			return Result{}, err
 		}
-		if err := fs.requireWritable(); err != nil {
-			return Result{}, err
-		}
-
-		path, err := fs.resolve(a.Path)
+		path, inside, err := fs.resolve(a.Path)
 		if err != nil {
 			return Result{}, err
 		}
+		if err := fs.guard(ctx, "write_file", AccessWrite, fs.display(path), inside); err != nil {
+			return Result{}, err
+		}
+
 		if info, err := os.Stat(path); err == nil && info.IsDir() {
 			return Result{}, fmt.Errorf("%s is a directory", fs.display(path))
 		}
@@ -330,9 +325,7 @@ func (fs *FS) writeFile() Tool {
 		if err := writeFileAtomic(path, []byte(a.Content)); err != nil {
 			return Result{}, err
 		}
-		return Result{Output: fmt.Sprintf(
-			"wrote %d bytes to %s", len(a.Content), fs.display(path),
-		)}, nil
+		return Result{Output: fmt.Sprintf("wrote %d bytes to %s", len(a.Content), fs.display(path))}, nil
 	})
 }
 
@@ -348,20 +341,20 @@ func (fs *FS) editFile() Tool {
 		if err := ctx.Err(); err != nil {
 			return Result{}, err
 		}
-		if err := fs.requireWritable(); err != nil {
-			return Result{}, err
-		}
 		if a.OldString == "" {
 			return Result{}, errors.New("old_string must not be empty")
 		}
 		if a.OldString == a.NewString {
 			return Result{}, errors.New("old_string and new_string are identical")
 		}
-
-		path, err := fs.resolve(a.Path)
+		path, inside, err := fs.resolve(a.Path)
 		if err != nil {
 			return Result{}, err
 		}
+		if err := fs.guard(ctx, "edit_file", AccessWrite, fs.display(path), inside); err != nil {
+			return Result{}, err
+		}
+
 		data, err := os.ReadFile(path)
 		if err != nil {
 			return Result{}, err
@@ -401,9 +394,7 @@ func (fs *FS) editFile() Tool {
 		if a.ReplaceAll {
 			replaced = count
 		}
-		return Result{Output: fmt.Sprintf(
-			"replaced %d occurrence(s) in %s", replaced, fs.display(path),
-		)}, nil
+		return Result{Output: fmt.Sprintf("replaced %d occurrence(s) in %s", replaced, fs.display(path))}, nil
 	})
 }
 
@@ -417,15 +408,18 @@ func (fs *FS) listDir() Tool {
 		if err := ctx.Err(); err != nil {
 			return Result{}, err
 		}
-
 		arg := strings.TrimSpace(a.Path)
 		if arg == "" {
 			arg = "."
 		}
-		path, err := fs.resolve(arg)
+		path, inside, err := fs.resolve(arg)
 		if err != nil {
 			return Result{}, err
 		}
+		if err := fs.guard(ctx, "list_dir", AccessRead, fs.display(path), inside); err != nil {
+			return Result{}, err
+		}
+
 		info, err := os.Stat(path)
 		if err != nil {
 			return Result{}, err
@@ -474,8 +468,65 @@ func (fs *FS) listDir() Tool {
 	})
 }
 
-// sortEntries orders directory entries the way a human reads them: directories
-// first, then files, each group case-insensitively by name.
+type deleteArgs struct {
+	Path      string `json:"path"`
+	Recursive bool   `json:"recursive"`
+}
+
+func (fs *FS) delete() Tool {
+	return Func[deleteArgs](deleteSpec, func(ctx context.Context, a deleteArgs) (Result, error) {
+		if err := ctx.Err(); err != nil {
+			return Result{}, err
+		}
+		path, inside, err := fs.resolve(a.Path)
+		if err != nil {
+			return Result{}, err
+		}
+		if err := fs.guard(ctx, "delete", AccessWrite, fs.display(path), inside); err != nil {
+			return Result{}, err
+		}
+
+		info, err := os.Lstat(path)
+		if err != nil {
+			return Result{}, err
+		}
+		if info.IsDir() && a.Recursive {
+			err = os.RemoveAll(path)
+		} else {
+			err = os.Remove(path)
+		}
+		if err != nil {
+			return Result{}, err
+		}
+		return Result{Output: "deleted " + fs.display(path)}, nil
+	})
+}
+
+type mkdirArgs struct {
+	Path string `json:"path"`
+}
+
+func (fs *FS) mkdir() Tool {
+	return Func[mkdirArgs](mkdirSpec, func(ctx context.Context, a mkdirArgs) (Result, error) {
+		if err := ctx.Err(); err != nil {
+			return Result{}, err
+		}
+		path, inside, err := fs.resolve(a.Path)
+		if err != nil {
+			return Result{}, err
+		}
+		if err := fs.guard(ctx, "mkdir", AccessWrite, fs.display(path), inside); err != nil {
+			return Result{}, err
+		}
+		if err := os.MkdirAll(path, 0o755); err != nil {
+			return Result{}, err
+		}
+		return Result{Output: "created directory " + fs.display(path)}, nil
+	})
+}
+
+// sortEntries orders directory entries: directories first, then files, each group
+// case-insensitively by name.
 func sortEntries(entries []os.DirEntry) {
 	sort.Slice(entries, func(i, j int) bool {
 		di, dj := entries[i].IsDir(), entries[j].IsDir()
@@ -486,9 +537,8 @@ func sortEntries(entries []os.DirEntry) {
 	})
 }
 
-// writeFileAtomic replaces path in one step: write a temp file in the same
-// directory, then rename over the target. A crash mid-write cannot leave a
-// half-written source file, and the target's permission bits are preserved.
+// writeFileAtomic writes a temp file then renames it over the target, preserving
+// the target's permission bits.
 func writeFileAtomic(path string, data []byte) error {
 	dir := filepath.Dir(path)
 
@@ -521,13 +571,12 @@ func writeFileAtomic(path string, data []byte) error {
 	if err := os.Rename(name, path); err != nil {
 		return err
 	}
-	name = "" // renamed: nothing left to clean up
+	name = ""
 	return nil
 }
 
-// splitLines splits text into lines and drops the trailing empty element a final
-// newline produces, so a 3-line file reports 3 lines rather than 4. A carriage
-// return before the newline is stripped so CRLF files read cleanly.
+// splitLines splits text into lines, dropping the trailing empty element a final
+// newline produces and stripping a carriage return before each newline.
 func splitLines(s string) []string {
 	if s == "" {
 		return nil
@@ -548,8 +597,7 @@ func clipLine(s string) string {
 	return cutAtRune(s, maxLineBytes) + "…"
 }
 
-// isBinary reports whether data looks like a binary blob. A NUL byte in the
-// first 8 KiB is the heuristic used by git and most editors.
+// isBinary reports whether data looks binary: a NUL byte in the first 8 KiB.
 func isBinary(data []byte) bool {
 	const sniff = 8000
 	if len(data) > sniff {
@@ -558,7 +606,7 @@ func isBinary(data []byte) bool {
 	return bytes.IndexByte(data, 0) >= 0
 }
 
-// humanSize formats a byte count for a one-line tool message.
+// humanSize formats a byte count for a one-line message.
 func humanSize(n int64) string {
 	const unit = 1024
 	if n < unit {
@@ -575,8 +623,7 @@ func humanSize(n int64) string {
 	return fmt.Sprintf("%.1f PiB", value/unit)
 }
 
-// matchLines returns the 1-based line numbers of at most max occurrences of sub
-// in content, so an ambiguous edit can tell the model where the candidates are.
+// matchLines returns the 1-based line numbers of at most max occurrences of sub.
 func matchLines(content, sub string, max int) []int {
 	var out []int
 	pos, line := 0, 1

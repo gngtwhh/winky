@@ -4,6 +4,7 @@ import (
 	"time"
 
 	"winky/internal/agent"
+	"winky/internal/tool"
 )
 
 // AgentEvent wraps one agent.Event as a tea.Msg. Exactly one pump goroutine
@@ -24,4 +25,11 @@ type turnResult struct {
 // tickMsg requests a coalesced re-render of streamed deltas.
 type tickMsg struct {
 	ID int
+}
+
+// permRequest asks the user to authorize one tool operation; the decision is
+// delivered on reply.
+type permRequest struct {
+	req   tool.Request
+	reply chan bool
 }

@@ -10,10 +10,8 @@ const (
 
 	DefaultLogLevel string = "info"
 
-	DefaultAgentDirBase   string  = ".winky"
-	DefaultMaxTurn        int     = 20
-	DefaultMaxTimeMinutes         = 60
-	DefaultTemperature    float64 = 0.7
+	DefaultAgentDirBase string  = ".winky"
+	DefaultTemperature  float64 = 0.7
 )
 
 func DefaultConfig() *Config {
@@ -24,10 +22,8 @@ func DefaultConfig() *Config {
 			MaxOutputTokens: DefaultMaxOutputTokens,
 		},
 		Agent: AgentConfig{
-			AgentDir:       path.Join(home, DefaultAgentDirBase),
-			MaxTurns:       DefaultMaxTurn,
-			MaxTimeMinutes: DefaultMaxTimeMinutes,
-			Temperature:    DefaultTemperature,
+			AgentDir:    path.Join(home, DefaultAgentDirBase),
+			Temperature: DefaultTemperature,
 		},
 		LogLevel: DefaultLogLevel,
 		Cwd:      mustGetWd(),

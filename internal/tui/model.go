@@ -12,6 +12,7 @@ import (
 	"charm.land/lipgloss/v2"
 
 	"winky/internal/llm"
+	"winky/internal/tool"
 )
 
 // Chrome around the scrollback viewport.
@@ -106,6 +107,10 @@ type model struct {
 	label   string
 	workDir string
 	home    string
+
+	// Tool permissions.
+	policy *tool.Policy
+	perm   *permRequest // non-nil while a permission prompt is open
 }
 
 func newModel(ag Agent, st Styles, label string, expandReasoning bool) model {

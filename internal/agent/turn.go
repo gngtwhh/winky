@@ -2,6 +2,7 @@ package agent
 
 import (
 	"strings"
+	"time"
 
 	"winky/internal/llm"
 )
@@ -38,11 +39,20 @@ type Block struct {
 	Arguments string
 }
 
-// Turn is the assembled result of one model response, in generation order.
-// Blocks may interleave reasoning, summary, message and tool-call blocks;
-// consumers must not assume a fixed shape.
+// Turn is the assembled result of one user turn: the model blocks across all
+// requests plus the tool executions between them, in generation order.
 type Turn struct {
-	Blocks []Block
+	Blocks      []Block
+	ToolResults []ToolResult
+}
+
+// ToolResult is the outcome of executing one tool call.
+type ToolResult struct {
+	CallID   string
+	Name     string
+	Output   string
+	IsError  bool
+	Duration time.Duration
 }
 
 // Reasoning returns the concatenated reasoning text.

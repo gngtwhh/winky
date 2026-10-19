@@ -14,8 +14,5 @@ func (c *Config) Validate() error {
 	if c.Provider.Model == "" {
 		return errors.New("config: provider.model is required")
 	}
-	if c.Agent.MaxTurns < 0 {
-		return errors.New("config: agent.maxTurns must not be negative")
-	}
 	return nil
 }

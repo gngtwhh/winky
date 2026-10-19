@@ -9,7 +9,7 @@ import (
 // Event is a single notification emitted by an Agent during a Turn.
 type Event interface{ agentEventType() string }
 
-// TurnStart marks the beginning of a turn.
+// TurnStart marks the beginning of a user turn, before the first request.
 type TurnStart struct {
 	Timestamp time.Time
 }
@@ -79,5 +79,6 @@ func (ToolCallArgsDelta) agentEventType() string {
 	return "tool_call_args_delta"
 }
 func (ToolCallEnd) agentEventType() string { return "tool_call_end" }
+func (ToolResult) agentEventType() string  { return "tool_result" }
 func (TurnEnd) agentEventType() string     { return "turn_end" }
 func (TurnFailed) agentEventType() string  { return "turn_failed" }

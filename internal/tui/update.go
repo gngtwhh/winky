@@ -12,6 +12,7 @@ import (
 
 	"winky/internal/agent"
 	"winky/internal/llm"
+	"winky/internal/tool"
 )
 
 // errAgentNil guards against running without a configured agent.
@@ -61,7 +62,14 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, cmd
 
 	case tea.KeyPressMsg:
+		if m.perm != nil {
+			return m.handlePermKey(msg)
+		}
 		return m.handleKey(msg)
+
+	case permRequest:
+		m.perm = &msg
+		return m, nil
 
 	case tea.MouseClickMsg, tea.MouseWheelMsg, tea.MouseMotionMsg, tea.MouseReleaseMsg:
 		return m.handleMouse(msg)
@@ -134,6 +142,19 @@ func (m model) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	m.input, cmd = m.input.Update(msg)
 	m.relayoutIfNeeded()
 	return m, cmd
+}
+
+// handlePermKey answers the open permission prompt: y allows, n/esc denies.
+func (m model) handlePermKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
+	allow := key.Matches(msg, key.NewBinding(key.WithKeys("y", "Y")))
+	deny := key.Matches(msg, key.NewBinding(key.WithKeys("n", "N", "esc")))
+	if !allow && !deny {
+		return m, nil
+	}
+	m.perm.reply <- allow
+	m.perm = nil
+	m.status = ""
+	return m, nil
 }
 
 // handleMouse routes clicks to clickable reasoning labels and everything else to
@@ -220,6 +241,16 @@ func (m *model) handleEvent(e agent.Event) tea.Cmd {
 		m.history[idx].Text = ev.Arguments
 		m.dirty = true
 
+	case agent.ToolResult:
+		if !m.streaming || m.cancelled[m.turn] {
+			return nil
+		}
+		idx := m.ensureBlock(blockKey{kind: cardTool, id: ev.CallID})
+		m.history[idx].Output = ev.Output
+		m.history[idx].IsError = ev.IsError
+		m.history[idx].Duration = ev.Duration
+		m.dirty = true
+
 	case agent.TurnEnd:
 		if m.cancelled[m.turn] {
 			return nil
@@ -281,8 +312,20 @@ func (m *model) ensureBlock(key blockKey) int {
 
 func (m *model) applyTurn(turn agent.Turn) {
 	m.history = m.history[:m.turnStartIdx]
+	results := make(map[string]agent.ToolResult, len(turn.ToolResults))
+	for _, r := range turn.ToolResults {
+		results[r.CallID] = r
+	}
 	for _, blk := range turn.Blocks {
-		m.history = append(m.history, m.cardFromBlock(blk))
+		c := m.cardFromBlock(blk)
+		if blk.Kind == agent.BlockToolCall {
+			if r, ok := results[blk.ID]; ok {
+				c.Output = r.Output
+				c.IsError = r.IsError
+				c.Duration = r.Duration
+			}
+		}
+		m.history = append(m.history, c)
 	}
 	m.liveBlocks = nil
 }
@@ -315,6 +358,35 @@ func cardKindFor(k agent.BlockKind) cardKind {
 	default:
 		return cardAssistant
 	}
+}
+
+// applyCommand handles a "/" input: /readonly, /workspace (or /write), /full.
+func (m model) applyCommand(text string) (tea.Model, tea.Cmd) {
+	m.input.Reset()
+	perm, ok := parsePerm(text)
+	if !ok {
+		m.status = "unknown command: " + text
+		return m, nil
+	}
+	if m.policy == nil {
+		m.status = "no tool policy attached"
+		return m, nil
+	}
+	m.policy.Set(perm)
+	m.status = "permission: " + perm.String()
+	return m, nil
+}
+
+func parsePerm(s string) (tool.Permission, bool) {
+	switch strings.TrimSpace(s) {
+	case "/readonly":
+		return tool.ReadOnly, true
+	case "/workspace", "/write":
+		return tool.WorkspaceWrite, true
+	case "/full":
+		return tool.FullAccess, true
+	}
+	return tool.WorkspaceWrite, false
 }
 
 // handleTurnResult reconciles the command's return value with the event stream.
@@ -365,6 +437,9 @@ func (m model) submit() (tea.Model, tea.Cmd) {
 	text := strings.TrimSpace(m.input.Value())
 	if text == "" {
 		return m, nil
+	}
+	if strings.HasPrefix(text, "/") {
+		return m.applyCommand(text)
 	}
 	if m.ag == nil {
 		m.err = errAgentNil

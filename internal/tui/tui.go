@@ -8,6 +8,7 @@ import (
 	tea "charm.land/bubbletea/v2"
 
 	"winky/internal/agent"
+	"winky/internal/tool"
 )
 
 // Agent is the subset of *agent.Agent the TUI needs. Keeping it an interface
@@ -29,6 +30,7 @@ type Tui struct {
 	workDir         string
 	altScreen       bool
 	expandReasoning bool
+	policy          *tool.Policy
 
 	evCh chan AgentEvent
 	m    model
@@ -64,6 +66,12 @@ func WithReasoningExpanded(on bool) Option {
 	return func(t *Tui) { t.expandReasoning = on }
 }
 
+// WithPolicy attaches the shared tool permission policy the TUI shows and can
+// flip, and whose prompter it answers.
+func WithPolicy(p *tool.Policy) Option {
+	return func(t *Tui) { t.policy = p }
+}
+
 // New builds a TUI around an Agent. The agent may be nil, in which case sends
 // are rejected with a notice instead of panicking.
 func New(ag Agent, opts ...Option) *Tui {
@@ -81,6 +89,7 @@ func New(ag Agent, opts ...Option) *Tui {
 	t.m.eventChan = t.evCh
 	t.m.altScreen = t.altScreen
 	t.m.workDir = t.workDir
+	t.m.policy = t.policy
 	if home, err := os.UserHomeDir(); err == nil {
 		t.m.home = home
 	}
@@ -113,6 +122,22 @@ func (t *Tui) Run(ctx context.Context) error {
 		tea.WithOutput(t.out),
 	}, t.opts...)
 
-	_, err := tea.NewProgram(t.m, opts...).Run()
+	program := tea.NewProgram(t.m, opts...)
+	if t.policy != nil {
+		t.policy.SetPrompter(func(pctx context.Context, req tool.Request) (bool, error) {
+			reply := make(chan bool, 1)
+			program.Send(permRequest{req: req, reply: reply})
+			select {
+			case ok := <-reply:
+				return ok, nil
+			case <-pctx.Done():
+				return false, pctx.Err()
+			case <-ctx.Done():
+				return false, ctx.Err()
+			}
+		})
+	}
+
+	_, err := program.Run()
 	return err
 }

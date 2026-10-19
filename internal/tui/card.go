@@ -24,8 +24,10 @@ type card struct {
 	ID       string // block id: item_id (text blocks) or call_id (tool blocks)
 	Title    string // tool name, for cardTool
 	Text     string
+	Output   string // tool result output, for cardTool
+	IsError  bool   // tool result was an error, for cardTool
 	At       time.Time
-	Duration time.Duration // assistant card only: wall-clock time of the turn
+	Duration time.Duration // assistant card: turn wall time; tool card: execution time
 	Live     bool          // still being streamed into
 	Expanded bool          // collapsible cards only (reasoning / summary)
 }
@@ -67,6 +69,16 @@ func (c card) labelText() string {
 	case cardTool:
 		if c.Title != "" {
 			head = fmt.Sprintf("%s · %s", head, c.Title)
+		}
+		if c.Output != "" {
+			if c.IsError {
+				head += " ✗"
+			} else {
+				head += " ✓"
+			}
+		}
+		if d := c.Duration.Round(time.Millisecond); d > 0 {
+			head = fmt.Sprintf("%s · %s", head, d)
 		}
 	}
 	return head
@@ -116,6 +128,14 @@ func (c card) lines(width int) []cardLine {
 	for _, l := range bodyLines {
 		out = append(out, cardLine{text: "  " + l})
 	}
+
+	if c.Kind == cardTool && c.Output != "" {
+		out = append(out, cardLine{text: "  ── output ──"})
+		for _, l := range wrapText(c.Output, bodyWidth) {
+			out = append(out, cardLine{text: "  " + l})
+		}
+	}
+
 	return append(out, cardLine{text: ""})
 }
 

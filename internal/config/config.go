@@ -26,10 +26,8 @@ type ProviderConfig struct {
 }
 
 type AgentConfig struct {
-	AgentDir       string  `json:"agentDir"`
-	MaxTurns       int     `json:"maxTurns,omitempty"`
-	MaxTimeMinutes int     `json:"maxTimeMinutes,omitempty"`
-	Temperature    float64 `json:"temperature,omitempty"`
+	AgentDir    string  `json:"agentDir"`
+	Temperature float64 `json:"temperature,omitempty"`
 }
 
 // Load loads config.json and .env files

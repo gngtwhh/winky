@@ -5,6 +5,7 @@ import (
 	"testing"
 
 	"winky/internal/llm"
+	"winky/internal/tool"
 )
 
 // fakeStreamer replays a fixed chunk sequence through a channel.
@@ -120,5 +121,61 @@ func TestTurnFailedCarriesUsage(t *testing.T) {
 	}
 	if ag.totalUsage.TotalTokens != 30 {
 		t.Fatalf("agent total usage = %+v, want 30", ag.totalUsage)
+	}
+}
+
+// scriptedStreamer returns the i-th response on the i-th call.
+type scriptedStreamer struct {
+	resps []*llm.Response
+	calls int
+}
+
+func (s *scriptedStreamer) Stream(_ context.Context, _ llm.Request) (<-chan llm.Chunk, error) {
+	i := s.calls
+	s.calls++
+	ch := make(chan llm.Chunk, 2)
+	ch <- llm.ResponseStart{}
+	ch <- llm.ResponseEnd{StopReason: llm.StopReasonDone, Response: s.resps[i]}
+	close(ch)
+	return ch, nil
+}
+
+func (s *scriptedStreamer) Name() string { return "scripted" }
+
+type fakeTools struct{ res map[string]tool.Result }
+
+func (f *fakeTools) Specs() []llm.ToolSpec                          { return nil }
+func (f *fakeTools) Run(_ context.Context, c tool.Call) tool.Result { return f.res[c.Name] }
+func (f *fakeTools) Sequential(string) bool                         { return false }
+
+func TestTurnRunsToolsAndLoops(t *testing.T) {
+	ag := New(&scriptedStreamer{resps: []*llm.Response{
+		{Output: []llm.OutputItem{{Type: llm.ItemFunctionCall, CallID: "c1", Name: "echo", Arguments: `{}`}}},
+		{Output: []llm.OutputItem{messageItem("m2", "done")}},
+	}}, WithTools(&fakeTools{res: map[string]tool.Result{"echo": {Output: "ok"}}}))
+
+	turn, err := ag.Turn(context.Background(), "hi")
+	if err != nil {
+		t.Fatalf("Turn: %v", err)
+	}
+	if len(turn.ToolResults) != 1 || turn.ToolResults[0].Output != "ok" {
+		t.Fatalf("tool results = %+v", turn.ToolResults)
+	}
+	if turn.Output() != "done" {
+		t.Fatalf("output = %q, want done", turn.Output())
+	}
+
+	h := ag.History()
+	if len(h) != 4 {
+		t.Fatalf("history length = %d: %+v", len(h), h)
+	}
+	if h[1].Role != llm.RoleAssistant || len(h[1].ToolCalls) != 1 {
+		t.Fatalf("history[1] = %+v", h[1])
+	}
+	if h[2].Role != llm.RoleToolOutput || h[2].ToolCallID != "c1" {
+		t.Fatalf("history[2] = %+v", h[2])
+	}
+	if h[3].Role != llm.RoleAssistant || h[3].Content != "done" {
+		t.Fatalf("history[3] = %+v", h[3])
 	}
 }

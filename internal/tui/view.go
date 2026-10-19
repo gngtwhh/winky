@@ -63,6 +63,9 @@ func (m model) statusView() string {
 	hint := "[enter] Send · [ctrl+j] Line Feed · [ctrl+t] Thinking · [ctrl+c] Quit"
 
 	switch {
+	case m.perm != nil:
+		left = fmt.Sprintf("Allow %s to %s %s? [y/n]", m.perm.req.Tool, m.perm.req.Access, m.perm.req.Target)
+		hint = "y Allow · n Deny"
 	case m.streaming:
 		left = fmt.Sprintf("%s generating · %s", m.sp.View(), time.Since(m.started).Round(time.Second))
 		hint = "esc Abort · Press a Thinking title to unfold"
@@ -70,6 +73,10 @@ func (m model) statusView() string {
 		left = "Error"
 	case m.status != "":
 		left = m.status
+	default:
+		if m.policy != nil {
+			left = "Ready · " + m.policy.Get().String()
+		}
 	}
 	if m.turn > 0 {
 		left = fmt.Sprintf("%s · Turn %d", left, m.turn)

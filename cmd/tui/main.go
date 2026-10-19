@@ -20,6 +20,7 @@ import (
 	"winky/internal/llm"
 	"winky/internal/llm/api"
 	"winky/internal/llm/model"
+	"winky/internal/tool"
 	"winky/internal/tui"
 )
 
@@ -52,7 +53,13 @@ func main() {
 		log.Fatalf("create llm streamer: %v", err)
 	}
 
-	a, err := newAgent(streamer, cfg, *promptPath)
+	policy := tool.NewPolicy(tool.WorkspaceWrite)
+	reg, err := tool.NewDefault(cfg.Cwd, policy)
+	if err != nil {
+		log.Fatalf("create tools: %v", err)
+	}
+
+	a, err := newAgent(streamer, cfg, *promptPath, reg)
 	if err != nil {
 		log.Fatalf("create agent: %v", err)
 	}
@@ -63,8 +70,12 @@ func main() {
 	// The TUI is the single consumer of a.Events(); do not add another drainer
 	// here, or the two readers will steal each other's events.
 	label := m.Provider + "/" + m.Name
-	if err := tui.New(a, tui.WithModelLabel(label), tui.WithWorkDir(cfg.Cwd)).Run(ctx); err != nil &&
-		!errors.Is(err, tea.ErrProgramKilled) {
+	t := tui.New(a,
+		tui.WithModelLabel(label),
+		tui.WithWorkDir(cfg.Cwd),
+		tui.WithPolicy(policy),
+	)
+	if err := t.Run(ctx); err != nil && !errors.Is(err, tea.ErrProgramKilled) {
 		log.Fatalf("tui: %v", err)
 	}
 }
@@ -76,7 +87,7 @@ func main() {
 // prefix the conversation always repeats, it is also what makes provider-side
 // prompt caching pay off: a short chat never reaches the minimum cacheable
 // prefix, and its cache rate then stays at "—" for the whole session.
-func newAgent(streamer llm.Streamer, cfg *config.Config, promptPath string) (*agent.Agent, error) {
+func newAgent(streamer llm.Streamer, cfg *config.Config, promptPath string, tools agent.Toolset) (*agent.Agent, error) {
 	maxOutputTokens := cfg.Provider.MaxOutputTokens
 	if maxOutputTokens <= 0 {
 		maxOutputTokens = config.DefaultMaxOutputTokens
@@ -86,6 +97,9 @@ func newAgent(streamer llm.Streamer, cfg *config.Config, promptPath string) (*ag
 		agent.WithModel(cfg.Provider.Model),
 		agent.WithTemperature(cfg.Agent.Temperature),
 		agent.WithMaxOutputTokens(maxOutputTokens),
+	}
+	if tools != nil {
+		opts = append(opts, agent.WithTools(tools))
 	}
 
 	if promptPath != "" {
