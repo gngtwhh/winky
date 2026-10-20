@@ -20,7 +20,10 @@ import (
 	"winky/internal/llm"
 	"winky/internal/llm/api"
 	"winky/internal/llm/model"
+	"winky/internal/session"
 	"winky/internal/tool"
+	"winky/internal/transcript"
+	"winky/internal/transcript/jsonl"
 	"winky/internal/tui"
 )
 
@@ -64,7 +67,31 @@ func main() {
 		log.Fatalf("create tools: %v", err)
 	}
 
-	a, err := newAgent(streamer, cfg, *promptPath, reg)
+	sess, err := session.New(cfg.Agent.AgentDir, session.Options{
+		Cwd:      cfg.Cwd,
+		Provider: cfg.Provider.Name,
+		Model:    cfg.Provider.Model,
+	})
+	if err != nil {
+		log.Fatalf("create session: %v", err)
+	}
+	defer func() {
+		if err := sess.Close(); err != nil {
+			log.Printf("close session: %v", err)
+		}
+	}()
+
+	rec, err := jsonl.Open(sess.TranscriptPath())
+	if err != nil {
+		log.Fatalf("open transcript: %v", err)
+	}
+	defer func() {
+		if err := rec.Close(); err != nil {
+			log.Printf("close transcript: %v", err)
+		}
+	}()
+
+	a, err := newAgent(streamer, cfg, *promptPath, reg, rec)
 	if err != nil {
 		log.Fatalf("create agent: %v", err)
 	}
@@ -93,7 +120,7 @@ func main() {
 // prefix the conversation always repeats, it is also what makes provider-side
 // prompt caching pay off: a short chat never reaches the minimum cacheable
 // prefix, and its cache rate then stays at "—" for the whole session.
-func newAgent(streamer llm.Streamer, cfg *config.Config, promptPath string, tools agent.Toolset) (*agent.Agent, error) {
+func newAgent(streamer llm.Streamer, cfg *config.Config, promptPath string, tools agent.Toolset, rec transcript.Recorder) (*agent.Agent, error) {
 	maxOutputTokens := cfg.Provider.MaxOutputTokens
 	if maxOutputTokens <= 0 {
 		maxOutputTokens = config.DefaultMaxOutputTokens
@@ -106,6 +133,9 @@ func newAgent(streamer llm.Streamer, cfg *config.Config, promptPath string, tool
 	}
 	if tools != nil {
 		opts = append(opts, agent.WithTools(tools))
+	}
+	if rec != nil {
+		opts = append(opts, agent.WithTranscriptRecorder(rec))
 	}
 
 	if promptPath != "" {

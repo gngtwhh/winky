@@ -4,6 +4,7 @@ import (
 	"context"
 	"testing"
 	"time"
+	"winky/internal/schema"
 
 	"winky/internal/llm"
 	"winky/internal/tool"
@@ -53,16 +54,16 @@ func messageItem(id, text string) llm.OutputItem {
 
 // drainTurn reads events until the turn settles. It keeps the tests independent
 // of how many non-terminal events a turn emits.
-func drainTurn(t *testing.T, ag *Agent) []Event {
+func drainTurn(t *testing.T, ag *Agent) []schema.Event {
 	t.Helper()
-	var events []Event
+	var events []schema.Event
 	timeout := time.After(time.Second)
 	for {
 		select {
 		case ev := <-ag.Events():
 			events = append(events, ev)
 			switch ev.(type) {
-			case TurnEnd, TurnFailed:
+			case schema.TurnEnd, schema.TurnFailed:
 				return events
 			}
 		case <-timeout:
@@ -74,17 +75,19 @@ func drainTurn(t *testing.T, ag *Agent) []Event {
 // A successful Turn emits TurnStart, one delta per chunk, ContextUsage when
 // the provider reports prompt tokens, then TurnEnd.
 func TestTurnEndCarriesUsage(t *testing.T) {
-	ag := New(&fakeStreamer{chunks: []llm.Chunk{
-		llm.ResponseStart{},
-		llm.OutputDelta{ItemID: "msg_1", Text: "hi"},
-		llm.ResponseEnd{
-			StopReason: llm.StopReasonDone,
-			Response: &llm.Response{
-				Output: []llm.OutputItem{messageItem("msg_1", "hi")},
-				Usage:  usage(31, 31, 62, 0),
+	ag := New(
+		&fakeStreamer{chunks: []llm.Chunk{
+			llm.ResponseStart{},
+			llm.OutputDelta{ItemID: "msg_1", Text: "hi"},
+			llm.ResponseEnd{
+				StopReason: llm.StopReasonDone,
+				Response: &llm.Response{
+					Output: []llm.OutputItem{messageItem("msg_1", "hi")},
+					Usage:  usage(31, 31, 62, 0),
+				},
 			},
-		},
-	}})
+		}},
+	)
 
 	res, err := ag.Turn(context.Background(), "hi")
 	if err != nil {
@@ -97,9 +100,9 @@ func TestTurnEndCarriesUsage(t *testing.T) {
 		t.Fatalf("blocks = %+v, want one message block", res.Blocks)
 	}
 
-	var end TurnEnd
+	var end schema.TurnEnd
 	for _, ev := range drainTurn(t, ag) {
-		if te, ok := ev.(TurnEnd); ok {
+		if te, ok := ev.(schema.TurnEnd); ok {
 			end = te
 		}
 	}
@@ -116,24 +119,26 @@ func TestTurnEndCarriesUsage(t *testing.T) {
 
 // A failed turn still records the usage the provider reported before failing.
 func TestTurnFailedCarriesUsage(t *testing.T) {
-	ag := New(&fakeStreamer{chunks: []llm.Chunk{
-		llm.ResponseStart{},
-		llm.OutputDelta{Text: "partial"},
-		llm.ResponseEnd{
-			StopReason: llm.StopReasonIncomplete,
-			Response: &llm.Response{
-				Usage: usage(20, 10, 30, 0),
+	ag := New(
+		&fakeStreamer{chunks: []llm.Chunk{
+			llm.ResponseStart{},
+			llm.OutputDelta{Text: "partial"},
+			llm.ResponseEnd{
+				StopReason: llm.StopReasonIncomplete,
+				Response: &llm.Response{
+					Usage: usage(20, 10, 30, 0),
+				},
 			},
-		},
-	}})
+		}},
+	)
 
 	if _, err := ag.Turn(context.Background(), "hi"); err == nil {
 		t.Fatal("expected an error for an incomplete stream")
 	}
 
-	var failed TurnFailed
+	var failed schema.TurnFailed
 	for _, ev := range drainTurn(t, ag) {
-		if tf, ok := ev.(TurnFailed); ok {
+		if tf, ok := ev.(schema.TurnFailed); ok {
 			failed = tf
 		}
 	}
@@ -170,10 +175,12 @@ func (f *fakeTools) Run(_ context.Context, c tool.Call) tool.Result { return f.r
 func (f *fakeTools) Sequential(string) bool                         { return false }
 
 func TestTurnRunsToolsAndLoops(t *testing.T) {
-	ag := New(&scriptedStreamer{resps: []*llm.Response{
-		{Output: []llm.OutputItem{{Type: llm.ItemFunctionCall, CallID: "c1", Name: "echo", Arguments: `{}`}}},
-		{Output: []llm.OutputItem{messageItem("m2", "done")}},
-	}}, WithTools(&fakeTools{res: map[string]tool.Result{"echo": {Output: "ok"}}}))
+	ag := New(
+		&scriptedStreamer{resps: []*llm.Response{
+			{Output: []llm.OutputItem{{Type: llm.ItemFunctionCall, CallID: "c1", Name: "echo", Arguments: `{}`}}},
+			{Output: []llm.OutputItem{messageItem("m2", "done")}},
+		}}, WithTools(&fakeTools{res: map[string]tool.Result{"echo": {Output: "ok"}}}),
+	)
 
 	turn, err := ag.Turn(context.Background(), "hi")
 	if err != nil {

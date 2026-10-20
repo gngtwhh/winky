@@ -2,22 +2,22 @@ package tui
 
 import (
 	"time"
+	"winky/internal/schema"
 
-	"winky/internal/agent"
 	"winky/internal/tool"
 )
 
-// AgentEvent wraps one agent.Event as a tea.Msg. Exactly one pump goroutine
+// AgentEvent wraps one schema.Event as a tea.Msg. Exactly one pump goroutine
 // forwards every event here.
 type AgentEvent struct {
-	Event agent.Event
+	Event schema.Event
 }
 
 // turnResult is what the tea.Cmd running agent.Turn resolves to. TurnID discards
 // the result of a superseded or cancelled turn.
 type turnResult struct {
 	TurnID   int
-	Result   agent.Turn
+	Result   schema.Turn
 	Err      error
 	Duration time.Duration
 }

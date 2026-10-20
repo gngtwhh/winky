@@ -4,18 +4,18 @@ import (
 	"context"
 	"io"
 	"os"
+	"winky/internal/schema"
 
 	tea "charm.land/bubbletea/v2"
 
-	"winky/internal/agent"
 	"winky/internal/tool"
 )
 
 // Agent is the subset of *agent.Agent the TUI needs. Keeping it an interface
 // lets tests inject a scripted event channel without a real LLM.
 type Agent interface {
-	Turn(ctx context.Context, input string) (agent.Turn, error)
-	Events() <-chan agent.Event
+	Turn(ctx context.Context, input string) (schema.Turn, error)
+	Events() <-chan schema.Event
 }
 
 // Tui owns the Bubble Tea program and the single reader of Agent.Events().
@@ -124,26 +124,30 @@ func (t *Tui) Run(ctx context.Context) error {
 	t.m.eventChan = t.evCh
 	t.m.altScreen = t.altScreen
 
-	opts := append([]tea.ProgramOption{
-		tea.WithContext(ctx),
-		tea.WithInput(t.in),
-		tea.WithOutput(t.out),
-	}, t.opts...)
+	opts := append(
+		[]tea.ProgramOption{
+			tea.WithContext(ctx),
+			tea.WithInput(t.in),
+			tea.WithOutput(t.out),
+		}, t.opts...,
+	)
 
 	program := tea.NewProgram(t.m, opts...)
 	if t.policy != nil {
-		t.policy.SetPrompter(func(pctx context.Context, req tool.Request) (bool, error) {
-			reply := make(chan bool, 1)
-			program.Send(permRequest{req: req, reply: reply})
-			select {
-			case ok := <-reply:
-				return ok, nil
-			case <-pctx.Done():
-				return false, pctx.Err()
-			case <-ctx.Done():
-				return false, ctx.Err()
-			}
-		})
+		t.policy.SetPrompter(
+			func(pctx context.Context, req tool.Request) (bool, error) {
+				reply := make(chan bool, 1)
+				program.Send(permRequest{req: req, reply: reply})
+				select {
+				case ok := <-reply:
+					return ok, nil
+				case <-pctx.Done():
+					return false, pctx.Err()
+				case <-ctx.Done():
+					return false, ctx.Err()
+				}
+			},
+		)
 	}
 
 	_, err := program.Run()

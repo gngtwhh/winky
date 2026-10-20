@@ -5,12 +5,12 @@ import (
 	"errors"
 	"strings"
 	"time"
+	"winky/internal/schema"
 
 	"charm.land/bubbles/v2/key"
 	"charm.land/bubbles/v2/spinner"
 	tea "charm.land/bubbletea/v2"
 
-	"winky/internal/agent"
 	"winky/internal/llm"
 	"winky/internal/tool"
 )
@@ -178,9 +178,9 @@ func (m model) handleMouse(msg tea.Msg) (tea.Model, tea.Cmd) {
 // Delta events are gated on m.streaming so a cancelled turn's late deltas cannot
 // resurrect the streaming state; terminal events still record usage after the
 // turn settled, but are dropped for a cancelled turn.
-func (m *model) handleEvent(e agent.Event) tea.Cmd {
+func (m *model) handleEvent(e schema.Event) tea.Cmd {
 	switch ev := e.(type) {
-	case agent.TurnStart:
+	case schema.TurnStart:
 		if m.cancelled[m.turn] {
 			// A cancelled turn that still raced a TurnStart through: ignore it
 			// rather than flickering back into the streaming state.
@@ -203,25 +203,25 @@ func (m *model) handleEvent(e agent.Event) tea.Cmd {
 		m.turnStartIdx = len(m.history)
 		return tickCmd(m.turn)
 
-	case agent.ReasoningDelta:
+	case schema.ReasoningDelta:
 		if !m.streaming || m.cancelled[m.turn] {
 			return nil
 		}
 		m.appendDelta(blockKey{kind: cardReasoning, id: ev.ItemID}, ev.Text)
 
-	case agent.ReasoningSummaryDelta:
+	case schema.ReasoningSummaryDelta:
 		if !m.streaming || m.cancelled[m.turn] {
 			return nil
 		}
 		m.appendDelta(blockKey{kind: cardSummary, id: ev.ItemID}, ev.Text)
 
-	case agent.OutputDelta:
+	case schema.OutputDelta:
 		if !m.streaming || m.cancelled[m.turn] {
 			return nil
 		}
 		m.appendDelta(blockKey{kind: cardAssistant, id: ev.ItemID}, ev.Text)
 
-	case agent.ToolCallStart:
+	case schema.ToolCallStart:
 		if !m.streaming || m.cancelled[m.turn] {
 			return nil
 		}
@@ -229,13 +229,13 @@ func (m *model) handleEvent(e agent.Event) tea.Cmd {
 		m.history[idx].Title = ev.Name
 		m.dirty = true
 
-	case agent.ToolCallArgsDelta:
+	case schema.ToolCallArgsDelta:
 		if !m.streaming || m.cancelled[m.turn] {
 			return nil
 		}
 		m.appendDelta(blockKey{kind: cardTool, id: ev.CallID}, ev.Delta)
 
-	case agent.ToolCallEnd:
+	case schema.ToolCallEnd:
 		if !m.streaming || m.cancelled[m.turn] {
 			return nil
 		}
@@ -243,7 +243,7 @@ func (m *model) handleEvent(e agent.Event) tea.Cmd {
 		m.history[idx].Text = ev.Arguments
 		m.dirty = true
 
-	case agent.ToolResult:
+	case schema.ToolResult:
 		if !m.streaming || m.cancelled[m.turn] {
 			return nil
 		}
@@ -253,7 +253,7 @@ func (m *model) handleEvent(e agent.Event) tea.Cmd {
 		m.history[idx].Duration = ev.Duration
 		m.dirty = true
 
-	case agent.ContextUsage:
+	case schema.ContextUsage:
 		if m.cancelled[m.turn] {
 			return nil
 		}
@@ -261,7 +261,7 @@ func (m *model) handleEvent(e agent.Event) tea.Cmd {
 		// the event may be delivered after turnResult.
 		m.contextTokens = ev.Tokens
 
-	case agent.TurnEnd:
+	case schema.TurnEnd:
 		if m.cancelled[m.turn] {
 			return nil
 		}
@@ -278,7 +278,7 @@ func (m *model) handleEvent(e agent.Event) tea.Cmd {
 		m.rebuild()
 		return nil
 
-	case agent.TurnFailed:
+	case schema.TurnFailed:
 		if m.cancelled[m.turn] {
 			return nil
 		}
@@ -320,15 +320,15 @@ func (m *model) ensureBlock(key blockKey) int {
 	return len(m.history) - 1
 }
 
-func (m *model) applyTurn(turn agent.Turn) {
+func (m *model) applyTurn(turn schema.Turn) {
 	m.history = m.history[:m.turnStartIdx]
-	results := make(map[string]agent.ToolResult, len(turn.ToolResults))
+	results := make(map[string]schema.ToolResult, len(turn.ToolResults))
 	for _, r := range turn.ToolResults {
 		results[r.CallID] = r
 	}
 	for _, blk := range turn.Blocks {
 		c := m.cardFromBlock(blk)
-		if blk.Kind == agent.BlockToolCall {
+		if blk.Kind == schema.BlockToolCall {
 			if r, ok := results[blk.ID]; ok {
 				c.Output = r.Output
 				c.IsError = r.IsError
@@ -340,7 +340,7 @@ func (m *model) applyTurn(turn agent.Turn) {
 	m.liveBlocks = nil
 }
 
-func (m *model) cardFromBlock(blk agent.Block) card {
+func (m *model) cardFromBlock(blk schema.Block) card {
 	c := card{
 		Kind: cardKindFor(blk.Kind),
 		ID:   blk.ID,
@@ -348,22 +348,22 @@ func (m *model) cardFromBlock(blk agent.Block) card {
 		At:   m.started,
 	}
 	switch blk.Kind {
-	case agent.BlockToolCall:
+	case schema.BlockToolCall:
 		c.Text = blk.Arguments
 		c.Title = blk.Name
-	case agent.BlockReasoning, agent.BlockReasoningSummary:
+	case schema.BlockReasoning, schema.BlockReasoningSummary:
 		c.Expanded = m.expandReasoning
 	}
 	return c
 }
 
-func cardKindFor(k agent.BlockKind) cardKind {
+func cardKindFor(k schema.BlockKind) cardKind {
 	switch k {
-	case agent.BlockReasoning:
+	case schema.BlockReasoning:
 		return cardReasoning
-	case agent.BlockReasoningSummary:
+	case schema.BlockReasoningSummary:
 		return cardSummary
-	case agent.BlockToolCall:
+	case schema.BlockToolCall:
 		return cardTool
 	default:
 		return cardAssistant

@@ -5,8 +5,7 @@ import (
 	"strings"
 	"testing"
 	"time"
-
-	"winky/internal/agent"
+	"winky/internal/schema"
 )
 
 func TestWrapText(t *testing.T) {
@@ -29,17 +28,19 @@ func TestWrapText(t *testing.T) {
 	}
 
 	for _, tc := range cases {
-		t.Run(tc.name, func(t *testing.T) {
-			got := wrapText(tc.in, tc.width)
-			if !reflect.DeepEqual(got, tc.want) {
-				t.Fatalf("wrapText(%q, %d) = %q, want %q", tc.in, tc.width, got, tc.want)
-			}
-			for _, l := range got {
-				if w := displayWidth(l); w > tc.width {
-					t.Fatalf("line %q width %d exceeds %d", l, w, tc.width)
+		t.Run(
+			tc.name, func(t *testing.T) {
+				got := wrapText(tc.in, tc.width)
+				if !reflect.DeepEqual(got, tc.want) {
+					t.Fatalf("wrapText(%q, %d) = %q, want %q", tc.in, tc.width, got, tc.want)
 				}
-			}
-		})
+				for _, l := range got {
+					if w := displayWidth(l); w > tc.width {
+						t.Fatalf("line %q width %d exceeds %d", l, w, tc.width)
+					}
+				}
+			},
+		)
 	}
 }
 
@@ -49,10 +50,11 @@ func TestLongOutputWrapsToViewportWidth(t *testing.T) {
 	m := newTestModel(t, newFakeAgent())
 	long := strings.Repeat("word ", 50) // ~250 columns, no newline
 
-	m = feed(t, m,
-		AgentEvent{Event: agent.TurnStart{Timestamp: time.Now()}},
-		AgentEvent{Event: agent.OutputDelta{Text: long}},
-		AgentEvent{Event: agent.TurnEnd{Turn: turnOf("", long)}},
+	m = feed(
+		t, m,
+		AgentEvent{Event: schema.TurnStart{Timestamp: time.Now()}},
+		AgentEvent{Event: schema.OutputDelta{Text: long}},
+		AgentEvent{Event: schema.TurnEnd{Turn: turnOf("", long)}},
 	)
 
 	width := m.vp.Width()

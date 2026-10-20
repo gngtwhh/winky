@@ -7,6 +7,8 @@ import (
 	"fmt"
 	"sync"
 	"time"
+	"winky/internal/schema"
+	"winky/internal/transcript"
 
 	"winky/internal/llm"
 	"winky/internal/tool"
@@ -32,10 +34,13 @@ type Agent struct {
 	temperature     float64
 	maxOutputTokens int
 	tools           Toolset
-	events          chan Event
+	events          chan schema.Event
 
-	history    []llm.Message
 	totalUsage llm.TokenUsage
+	history    []llm.Message // TODO: to be improved
+
+	// TODO: Migration in progress: Migrating the conversation history to the persistent implementation
+	tsRecorder transcript.Recorder
 }
 
 // Option configures an Agent.
@@ -66,13 +71,20 @@ func WithTools(ts Toolset) Option {
 	return func(a *Agent) { a.tools = ts }
 }
 
+// WithTranscriptRecorder installs the persistent transcript recorder. A nil
+// recorder disables transcript writes and leaves the in-memory history as the
+// only record.
+func WithTranscriptRecorder(r transcript.Recorder) Option {
+	return func(a *Agent) { a.tsRecorder = r }
+}
+
 // New builds an Agent around the given streamer.
 func New(streamer llm.Streamer, opts ...Option) *Agent {
 	a := &Agent{streamer: streamer}
 	for _, opt := range opts {
 		opt(a)
 	}
-	a.events = make(chan Event, 32)
+	a.events = make(chan schema.Event, 32)
 	return a
 }
 
@@ -80,19 +92,36 @@ func New(streamer llm.Streamer, opts ...Option) *Agent {
 // a tool: each response that asks for tools is executed and fed back, then the
 // model is asked again.
 func (a *Agent) Turn(ctx context.Context, input string) (Turn, error) {
-	a.history = append(a.history, llm.Message{
-		Role: llm.RoleUser, Content: input, Timestamp: time.Now(),
-	})
-	a.emit(TurnStart{Timestamp: time.Now()})
+	startTime := time.Now()
 
 	var (
 		turn      Turn
 		turnUsage llm.TokenUsage
 	)
 
+	if err := a.record(transcript.TurnStart{Timestamp: startTime}); err != nil {
+		return Turn{}, a.fail(err, turnUsage)
+	}
+	if err := a.record(transcript.UserMessage{Content: input}); err != nil {
+		return Turn{}, a.fail(err, turnUsage)
+	}
+
+	// The legacy in-memory history stays in parallel with the transcript until
+	// the transcript becomes the source of truth for requests.
+	a.history = append(
+		a.history, llm.Message{
+			Role: llm.RoleUser, Content: input, Timestamp: startTime,
+		},
+	)
+	a.emit(schema.TurnStart{Timestamp: startTime})
+
 	for step := 0; ; step++ {
 		if step >= maxSteps {
 			return Turn{}, a.fail(fmt.Errorf("turn exceeded %d model calls", maxSteps), turnUsage)
+		}
+
+		if err := a.record(transcript.StepStart{Timestamp: time.Now()}); err != nil {
+			return Turn{}, a.fail(err, turnUsage)
 		}
 
 		req := llm.Request{
@@ -111,18 +140,27 @@ func (a *Agent) Turn(ctx context.Context, input string) (Turn, error) {
 		if usage.PromptTokens > 0 {
 			// The prompt-token count is the exact size of the request just
 			// sent, so it is the best available measure of context usage.
-			a.emit(ContextUsage{Tokens: usage.PromptTokens})
+			a.emit(schema.ContextUsage{Tokens: usage.PromptTokens})
 		}
 		if err != nil {
+			_ = a.record(transcript.StepEnd{Timestamp: time.Now()})
 			return Turn{}, a.fail(err, turnUsage)
 		}
 
 		stepTurn := turnFromResponse(resp)
+		if err := a.recordStep(stepTurn); err != nil {
+			_ = a.record(transcript.StepEnd{Timestamp: time.Now()})
+			return Turn{}, a.fail(err, turnUsage)
+		}
+
 		turn.Blocks = append(turn.Blocks, stepTurn.Blocks...)
 		a.history = append(a.history, messageFromStep(stepTurn))
 
 		calls := stepTurn.ToolCalls()
 		if len(calls) == 0 {
+			if err := a.record(transcript.StepEnd{Timestamp: time.Now()}); err != nil {
+				return Turn{}, a.fail(err, turnUsage)
+			}
 			break
 		}
 
@@ -134,20 +172,80 @@ func (a *Agent) Turn(ctx context.Context, input string) (Turn, error) {
 		results := a.runTools(ctx, tcalls)
 		turn.ToolResults = append(turn.ToolResults, results...)
 		for _, r := range results {
-			a.emit(ToolResult{
-				CallID: r.CallID, Name: r.Name, Output: r.Output,
-				IsError: r.IsError, Duration: r.Duration,
-			})
-			a.history = append(a.history, llm.Message{
-				Role: llm.RoleToolOutput, Name: r.Name,
-				ToolCallID: r.CallID, Content: r.Output, Timestamp: time.Now(),
-			})
+			if err := a.record(transcript.ToolResult{CallID: r.CallID, Output: r.Output}); err != nil {
+				_ = a.record(transcript.StepEnd{Timestamp: time.Now()})
+				return Turn{}, a.fail(err, turnUsage)
+			}
+			a.emit(
+				ToolResult{
+					CallID: r.CallID, Name: r.Name, Output: r.Output,
+					IsError: r.IsError, Duration: r.Duration,
+				},
+			)
+			a.history = append(
+				a.history, llm.Message{
+					Role: llm.RoleToolOutput, Name: r.Name,
+					ToolCallID: r.CallID, Content: r.Output, Timestamp: time.Now(),
+				},
+			)
+		}
+
+		if err := a.record(transcript.StepEnd{Timestamp: time.Now()}); err != nil {
+			return Turn{}, a.fail(err, turnUsage)
 		}
 	}
 
+	if err := a.record(transcript.TurnEnd{Timestamp: time.Now()}); err != nil {
+		return Turn{}, a.fail(err, turnUsage)
+	}
+
 	a.totalUsage = a.totalUsage.Add(turnUsage)
-	a.emit(TurnEnd{Turn: turn, Usage: turnUsage, TotalUsage: a.totalUsage})
+	a.emit(schema.TurnEnd{Turn: turn, Usage: turnUsage, TotalUsage: a.totalUsage})
 	return turn, nil
+}
+
+// record appends one event to the transcript when a recorder is configured.
+func (a *Agent) record(ev transcript.Event) error {
+	if a.tsRecorder == nil {
+		return nil
+	}
+	if err := a.tsRecorder.Append(ev); err != nil {
+		return fmt.Errorf("transcript append %s: %w", ev.Type(), err)
+	}
+	return nil
+}
+
+// recordStep writes the reasoning, reasoning summary, and assistant output
+// produced by one model response before that response joins the in-memory
+// history.
+func (a *Agent) recordStep(step Turn) error {
+	if reasoning := step.Reasoning(); reasoning != "" {
+		if err := a.record(transcript.AssistantReasoningMessage{Content: reasoning}); err != nil {
+			return err
+		}
+	}
+	if summary := step.Summary(); summary != "" {
+		if err := a.record(transcript.AssistantReasoningSummary{Content: summary}); err != nil {
+			return err
+		}
+	}
+
+	calls := step.ToolCalls()
+	toolCalls := make([]transcript.ToolCall, len(calls))
+	for i, c := range calls {
+		toolCalls[i] = transcript.ToolCall{
+			CallID: c.ID, Name: c.Name, Arguments: c.Arguments,
+		}
+	}
+
+	content := step.Output()
+	if content == "" && len(toolCalls) == 0 {
+		return nil
+	}
+	return a.record(transcript.AssistantOutputMessage{
+		Content:   content,
+		ToolCalls: toolCalls,
+	})
 }
 
 // stream runs one model request, forwarding live fragments to the event channel
@@ -163,22 +261,24 @@ func (a *Agent) stream(ctx context.Context, req llm.Request) (*llm.Response, llm
 	var finalResp *llm.Response
 	var usage llm.TokenUsage
 
+	// Consume the chunk groups obtained from the stream iteration
+	// and generate corresponding events
 	for chunk := range ch {
 		switch c := chunk.(type) {
 		case llm.ReasoningDelta:
-			a.emit(ReasoningDelta{ItemID: c.ItemID, Text: c.Text})
+			a.emit(schema.ReasoningDelta{ItemID: c.ItemID, Text: c.Text})
 		case llm.ReasoningSummaryDelta:
-			a.emit(ReasoningSummaryDelta{ItemID: c.ItemID, Text: c.Text})
+			a.emit(schema.ReasoningSummaryDelta{ItemID: c.ItemID, Text: c.Text})
 		case llm.OutputDelta:
-			a.emit(OutputDelta{ItemID: c.ItemID, Text: c.Text})
+			a.emit(schema.OutputDelta{ItemID: c.ItemID, Text: c.Text})
 		case llm.RefusalDelta:
-			a.emit(OutputDelta{ItemID: c.ItemID, Text: c.Text})
+			a.emit(schema.OutputDelta{ItemID: c.ItemID, Text: c.Text})
 		case llm.ToolCallStart:
-			a.emit(ToolCallStart{CallID: c.CallID, Name: c.Name})
+			a.emit(schema.ToolCallStart{CallID: c.CallID, Name: c.Name})
 		case llm.ToolCallArgsDelta:
-			a.emit(ToolCallArgsDelta{CallID: c.CallID, Delta: c.Delta})
+			a.emit(schema.ToolCallArgsDelta{CallID: c.CallID, Delta: c.Delta})
 		case llm.ToolCallEnd:
-			a.emit(ToolCallEnd{CallID: c.CallID, Arguments: c.Arguments})
+			a.emit(schema.ToolCallEnd{CallID: c.CallID, Arguments: c.Arguments})
 		case llm.ResponseEnd:
 			stopReason = c.StopReason
 			streamErr = c.Err
@@ -244,14 +344,17 @@ func (a *Agent) runOne(ctx context.Context, c tool.Call) ToolResult {
 	}
 }
 
-// fail records the accumulated usage and emits TurnFailed before returning err.
+// fail records the accumulated usage, closes the transcript turn, and emits
+// TurnFailed before returning err.
 func (a *Agent) fail(err error, usage llm.TokenUsage) error {
 	a.totalUsage = a.totalUsage.Add(usage)
-	a.emit(TurnFailed{Err: err, Usage: usage, TotalUsage: a.totalUsage})
+	_ = a.record(transcript.TurnFailed{Timestamp: time.Now(), Error: err.Error()})
+	a.emit(schema.TurnFailed{Err: err, Usage: usage, TotalUsage: a.totalUsage})
 	return err
 }
 
 // messageFromStep builds the assistant history message for one model response.
+// TODO: to be improved
 func messageFromStep(step Turn) llm.Message {
 	m := llm.Message{Role: llm.RoleAssistant, Content: step.Output(), Timestamp: time.Now()}
 	for _, b := range step.ToolCalls() {
@@ -262,15 +365,16 @@ func messageFromStep(step Turn) llm.Message {
 
 // emit sends one event to the events channel, blocking until a consumer reads
 // it. Callers must keep a reader draining the channel during every turn.
-func (a *Agent) emit(e Event) {
+func (a *Agent) emit(e schema.Event) {
 	a.events <- e
 }
 
-func (a *Agent) Events() <-chan Event {
+func (a *Agent) Events() <-chan schema.Event {
 	return a.events
 }
 
 // History returns a copy of the conversation so far.
+// TODO: to be improved
 func (a *Agent) History() []llm.Message {
 	out := make([]llm.Message, len(a.history))
 	copy(out, a.history)

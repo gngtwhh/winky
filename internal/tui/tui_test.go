@@ -7,6 +7,7 @@ import (
 	"sync"
 	"testing"
 	"time"
+	"winky/internal/schema"
 
 	"charm.land/bubbles/v2/spinner"
 	tea "charm.land/bubbletea/v2"
@@ -19,7 +20,7 @@ import (
 // fakeAgent is a scripted Agent: Turn only records calls, while Events returns a
 // channel the test drives directly.
 type fakeAgent struct {
-	ch chan agent.Event
+	ch chan schema.Event
 
 	mu    sync.Mutex
 	turns []string
@@ -27,7 +28,7 @@ type fakeAgent struct {
 }
 
 func newFakeAgent() *fakeAgent {
-	return &fakeAgent{ch: make(chan agent.Event, 16)}
+	return &fakeAgent{ch: make(chan schema.Event, 16)}
 }
 
 func (f *fakeAgent) Turn(_ context.Context, input string) (agent.Turn, error) {
@@ -37,7 +38,7 @@ func (f *fakeAgent) Turn(_ context.Context, input string) (agent.Turn, error) {
 	return agent.Turn{}, f.err
 }
 
-func (f *fakeAgent) Events() <-chan agent.Event { return f.ch }
+func (f *fakeAgent) Events() <-chan schema.Event { return f.ch }
 
 func (f *fakeAgent) turnCount() int {
 	f.mu.Lock()
@@ -92,12 +93,13 @@ func feed(t *testing.T, m model, msgs ...tea.Msg) model {
 // started by a TurnStart event.
 func turnRound(t *testing.T, m model) model {
 	t.Helper()
-	return feed(t, m,
-		AgentEvent{Event: agent.ReasoningDelta{Text: "think 1\n"}},
-		AgentEvent{Event: agent.ReasoningDelta{Text: "think 2\n"}},
-		AgentEvent{Event: agent.OutputDelta{Text: "hello "}},
-		AgentEvent{Event: agent.OutputDelta{Text: "world"}},
-		AgentEvent{Event: agent.TurnEnd{Turn: turnOf("think 1\nthink 2", "hello world")}},
+	return feed(
+		t, m,
+		AgentEvent{Event: schema.ReasoningDelta{Text: "think 1\n"}},
+		AgentEvent{Event: schema.ReasoningDelta{Text: "think 2\n"}},
+		AgentEvent{Event: schema.OutputDelta{Text: "hello "}},
+		AgentEvent{Event: schema.OutputDelta{Text: "world"}},
+		AgentEvent{Event: schema.TurnEnd{Turn: turnOf("think 1\nthink 2", "hello world")}},
 	)
 }
 
@@ -118,7 +120,7 @@ func TestUpdateRearmsEventReceiver(t *testing.T) {
 	ag := newFakeAgent()
 	m := newTestModel(t, ag)
 
-	next, cmd := m.Update(AgentEvent{Event: agent.TurnStart{Timestamp: time.Now()}})
+	next, cmd := m.Update(AgentEvent{Event: schema.TurnStart{Timestamp: time.Now()}})
 	m = next.(model)
 	if cmd == nil {
 		t.Fatal("Update(AgentEvent) returned no command; the receiver was not re-armed")
@@ -156,26 +158,26 @@ func TestBlocksStreamAndReconcile(t *testing.T) {
 	ag := newFakeAgent()
 	m := newTestModel(t, ag)
 
-	m = feed(t, m, AgentEvent{Event: agent.TurnStart{Timestamp: time.Now()}})
+	m = feed(t, m, AgentEvent{Event: schema.TurnStart{Timestamp: time.Now()}})
 	if len(m.history) != 0 {
 		t.Fatalf("no cards should be created eagerly, got %d", len(m.history))
 	}
 
 	// Same-ID reasoning deltas append to one live block.
-	m = feed(t, m, AgentEvent{Event: agent.ReasoningDelta{ItemID: "r1", Text: "think "}})
-	m = feed(t, m, AgentEvent{Event: agent.ReasoningDelta{ItemID: "r1", Text: "hard"}})
+	m = feed(t, m, AgentEvent{Event: schema.ReasoningDelta{ItemID: "r1", Text: "think "}})
+	m = feed(t, m, AgentEvent{Event: schema.ReasoningDelta{ItemID: "r1", Text: "hard"}})
 	if c := cardAt(t, m, cardReasoning); !c.Live || !c.Expanded || c.Text != "think hard" {
 		t.Fatalf("reasoning card = %+v, want live expanded text %q", c, "think hard")
 	}
 
 	// Summary is a distinct collapsible block.
-	m = feed(t, m, AgentEvent{Event: agent.ReasoningSummaryDelta{ItemID: "r1", Text: "summary text"}})
+	m = feed(t, m, AgentEvent{Event: schema.ReasoningSummaryDelta{ItemID: "r1", Text: "summary text"}})
 	if c := cardAt(t, m, cardSummary); !c.Live || !c.Expanded || c.Text != "summary text" {
 		t.Fatalf("summary card = %+v, want live expanded text %q", c, "summary text")
 	}
 
 	// Output is a separate message block.
-	m = feed(t, m, AgentEvent{Event: agent.OutputDelta{ItemID: "m1", Text: "answer"}})
+	m = feed(t, m, AgentEvent{Event: schema.OutputDelta{ItemID: "m1", Text: "answer"}})
 	if c := cardAt(t, m, cardAssistant); !c.Live || c.Text != "answer" {
 		t.Fatalf("assistant card = %+v, want live text %q", c, "answer")
 	}
@@ -186,7 +188,7 @@ func TestBlocksStreamAndReconcile(t *testing.T) {
 		{Kind: agent.BlockReasoningSummary, ID: "r1", Text: "summary text"},
 		{Kind: agent.BlockMessage, ID: "m1", Text: "answer"},
 	}}
-	m = feed(t, m, AgentEvent{Event: agent.TurnEnd{Turn: end}})
+	m = feed(t, m, AgentEvent{Event: schema.TurnEnd{Turn: end}})
 
 	if c := cardAt(t, m, cardReasoning); c.Live || c.Expanded {
 		t.Fatalf("reasoning card after TurnEnd = %+v, want folded", c)
@@ -205,7 +207,7 @@ func TestBlocksStreamAndReconcile(t *testing.T) {
 // A click on the reasoning label toggles it, and only that card.
 func TestClickTogglesReasoningCard(t *testing.T) {
 	m := newTestModel(t, newFakeAgent())
-	m = feed(t, m, AgentEvent{Event: agent.TurnStart{Timestamp: time.Now()}})
+	m = feed(t, m, AgentEvent{Event: schema.TurnStart{Timestamp: time.Now()}})
 	m = turnRound(t, m)
 
 	if len(m.hints) != 1 {
@@ -247,7 +249,7 @@ func TestCancelDiscardsStaleEvents(t *testing.T) {
 	}
 
 	before := len(m.history)
-	m = feed(t, m, AgentEvent{Event: agent.OutputDelta{Text: "late"}})
+	m = feed(t, m, AgentEvent{Event: schema.OutputDelta{Text: "late"}})
 
 	next, _ = m.Update(turnResult{TurnID: staleTurn, Result: agent.Turn{}, Err: errors.New("boom")})
 	m = next.(model)
@@ -418,14 +420,16 @@ func TestSpinnerRotates(t *testing.T) {
 // even though the duration only arrives with the command result after TurnEnd.
 func TestAssistantCardShowsTurnDuration(t *testing.T) {
 	m := newTestModel(t, newFakeAgent())
-	m = feed(t, m, AgentEvent{Event: agent.TurnStart{Timestamp: time.Now()}})
-	m = feed(t, m, AgentEvent{Event: agent.TurnEnd{Turn: turnOf("r", "hi")}})
+	m = feed(t, m, AgentEvent{Event: schema.TurnStart{Timestamp: time.Now()}})
+	m = feed(t, m, AgentEvent{Event: schema.TurnEnd{Turn: turnOf("r", "hi")}})
 
-	next, _ := m.Update(turnResult{
-		TurnID:   m.turn,
-		Result:   turnOf("r", "hi"),
-		Duration: 1500 * time.Millisecond,
-	})
+	next, _ := m.Update(
+		turnResult{
+			TurnID:   m.turn,
+			Result:   turnOf("r", "hi"),
+			Duration: 1500 * time.Millisecond,
+		},
+	)
 	m = next.(model)
 
 	c := cardAt(t, m, cardAssistant)
@@ -440,12 +444,14 @@ func TestAssistantCardShowsTurnDuration(t *testing.T) {
 // The usage row shows this turn's figures and the session total once reported.
 func TestUsageRowShowsTurnAndSession(t *testing.T) {
 	m := newTestModel(t, newFakeAgent())
-	m = feed(t, m, AgentEvent{Event: agent.TurnStart{Timestamp: time.Now()}})
-	m = feed(t, m, AgentEvent{Event: agent.TurnEnd{
-		Turn:       turnOf("r", "hi"),
-		Usage:      llm.TokenUsage{PromptTokens: 1000, CompletionTokens: 500, TotalTokens: 1500, CachedTokens: 500},
-		TotalUsage: llm.TokenUsage{PromptTokens: 2000, CompletionTokens: 1000, TotalTokens: 3000, CachedTokens: 1000},
-	}})
+	m = feed(t, m, AgentEvent{Event: schema.TurnStart{Timestamp: time.Now()}})
+	m = feed(
+		t, m, AgentEvent{Event: schema.TurnEnd{
+			Turn:       turnOf("r", "hi"),
+			Usage:      llm.TokenUsage{PromptTokens: 1000, CompletionTokens: 500, TotalTokens: 1500, CachedTokens: 500},
+			TotalUsage: llm.TokenUsage{PromptTokens: 2000, CompletionTokens: 1000, TotalTokens: 3000, CachedTokens: 1000},
+		}},
+	)
 
 	got := m.usageView()
 	if !strings.Contains(got, "This turn ↑1.0k ↓500 · Cache 50%") {
@@ -460,23 +466,27 @@ func TestUsageRowShowsTurnAndSession(t *testing.T) {
 // the terminal event arrives.
 func TestUsageRecordedAfterTurnResultSettles(t *testing.T) {
 	m := newTestModel(t, newFakeAgent())
-	m = feed(t, m, AgentEvent{Event: agent.TurnStart{Timestamp: time.Now()}})
+	m = feed(t, m, AgentEvent{Event: schema.TurnStart{Timestamp: time.Now()}})
 
-	next, _ := m.Update(turnResult{
-		TurnID:   m.turn,
-		Result:   turnOf("r", "hi"),
-		Duration: time.Second,
-	})
+	next, _ := m.Update(
+		turnResult{
+			TurnID:   m.turn,
+			Result:   turnOf("r", "hi"),
+			Duration: time.Second,
+		},
+	)
 	m = next.(model)
 	if m.streaming {
 		t.Fatal("turnResult did not settle the turn")
 	}
 
-	m = feed(t, m, AgentEvent{Event: agent.TurnEnd{
-		Turn:       turnOf("r", "hi"),
-		Usage:      llm.TokenUsage{PromptTokens: 100, CompletionTokens: 50, TotalTokens: 150, CachedTokens: 50},
-		TotalUsage: llm.TokenUsage{PromptTokens: 200, CompletionTokens: 100, TotalTokens: 300, CachedTokens: 100},
-	}})
+	m = feed(
+		t, m, AgentEvent{Event: schema.TurnEnd{
+			Turn:       turnOf("r", "hi"),
+			Usage:      llm.TokenUsage{PromptTokens: 100, CompletionTokens: 50, TotalTokens: 150, CachedTokens: 50},
+			TotalUsage: llm.TokenUsage{PromptTokens: 200, CompletionTokens: 100, TotalTokens: 300, CachedTokens: 100},
+		}},
+	)
 
 	if m.usage.TotalTokens != 150 || m.totalUsage.TotalTokens != 300 {
 		t.Fatalf("usage not recorded after settle: usage=%+v total=%+v", m.usage, m.totalUsage)
@@ -486,17 +496,19 @@ func TestUsageRecordedAfterTurnResultSettles(t *testing.T) {
 // A new turn clears the per-turn usage but keeps the session total.
 func TestUsageResetsPerTurn(t *testing.T) {
 	m := newTestModel(t, newFakeAgent())
-	m = feed(t, m, AgentEvent{Event: agent.TurnStart{Timestamp: time.Now()}})
-	m = feed(t, m, AgentEvent{Event: agent.TurnEnd{
-		Turn:       turnOf("r", "hi"),
-		Usage:      llm.TokenUsage{PromptTokens: 100, CompletionTokens: 50, TotalTokens: 150, CachedTokens: 50},
-		TotalUsage: llm.TokenUsage{PromptTokens: 100, CompletionTokens: 50, TotalTokens: 150, CachedTokens: 50},
-	}})
+	m = feed(t, m, AgentEvent{Event: schema.TurnStart{Timestamp: time.Now()}})
+	m = feed(
+		t, m, AgentEvent{Event: schema.TurnEnd{
+			Turn:       turnOf("r", "hi"),
+			Usage:      llm.TokenUsage{PromptTokens: 100, CompletionTokens: 50, TotalTokens: 150, CachedTokens: 50},
+			TotalUsage: llm.TokenUsage{PromptTokens: 100, CompletionTokens: 50, TotalTokens: 150, CachedTokens: 50},
+		}},
+	)
 	if m.usage.TotalTokens == 0 || m.totalUsage.TotalTokens == 0 {
 		t.Fatal("usage not set after first turn")
 	}
 
-	m = feed(t, m, AgentEvent{Event: agent.TurnStart{Timestamp: time.Now()}})
+	m = feed(t, m, AgentEvent{Event: schema.TurnStart{Timestamp: time.Now()}})
 	if m.usage.TotalTokens != 0 {
 		t.Fatalf("per-turn usage not reset on new turn: %+v", m.usage)
 	}
@@ -508,12 +520,14 @@ func TestUsageResetsPerTurn(t *testing.T) {
 // A failed turn still records the usage the provider reported before failing.
 func TestFailedTurnRecordsUsage(t *testing.T) {
 	m := newTestModel(t, newFakeAgent())
-	m = feed(t, m, AgentEvent{Event: agent.TurnStart{Timestamp: time.Now()}})
-	m = feed(t, m, AgentEvent{Event: agent.TurnFailed{
-		Err:        errors.New("boom"),
-		Usage:      llm.TokenUsage{PromptTokens: 100, CompletionTokens: 10, TotalTokens: 110},
-		TotalUsage: llm.TokenUsage{PromptTokens: 100, CompletionTokens: 10, TotalTokens: 110},
-	}})
+	m = feed(t, m, AgentEvent{Event: schema.TurnStart{Timestamp: time.Now()}})
+	m = feed(
+		t, m, AgentEvent{Event: schema.TurnFailed{
+			Err:        errors.New("boom"),
+			Usage:      llm.TokenUsage{PromptTokens: 100, CompletionTokens: 10, TotalTokens: 110},
+			TotalUsage: llm.TokenUsage{PromptTokens: 100, CompletionTokens: 10, TotalTokens: 110},
+		}},
+	)
 	if m.usage.TotalTokens != 110 || m.totalUsage.TotalTokens != 110 {
 		t.Fatalf("failed-turn usage not recorded: usage=%+v total=%+v", m.usage, m.totalUsage)
 	}
@@ -528,11 +542,13 @@ func TestCancelledTurnDropsUsage(t *testing.T) {
 	next, _ = m.Update(keyPress(tea.KeyEsc, 0))
 	m = next.(model)
 
-	m = feed(t, m, AgentEvent{Event: agent.TurnEnd{
-		Turn:       turnOf("r", "hi"),
-		Usage:      llm.TokenUsage{PromptTokens: 100, CompletionTokens: 50, TotalTokens: 150, CachedTokens: 50},
-		TotalUsage: llm.TokenUsage{PromptTokens: 100, CompletionTokens: 50, TotalTokens: 150, CachedTokens: 50},
-	}})
+	m = feed(
+		t, m, AgentEvent{Event: schema.TurnEnd{
+			Turn:       turnOf("r", "hi"),
+			Usage:      llm.TokenUsage{PromptTokens: 100, CompletionTokens: 50, TotalTokens: 150, CachedTokens: 50},
+			TotalUsage: llm.TokenUsage{PromptTokens: 100, CompletionTokens: 50, TotalTokens: 150, CachedTokens: 50},
+		}},
+	)
 	if m.usage.TotalTokens != 0 || m.totalUsage.TotalTokens != 0 {
 		t.Fatalf("cancelled-turn usage recorded: usage=%+v total=%+v", m.usage, m.totalUsage)
 	}
