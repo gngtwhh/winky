@@ -3,6 +3,7 @@ package agent
 import (
 	"context"
 	"testing"
+	"time"
 
 	"winky/internal/llm"
 	"winky/internal/tool"
@@ -50,8 +51,28 @@ func messageItem(id, text string) llm.OutputItem {
 	}
 }
 
-// Each successful Turn emits exactly TurnStart, one delta per chunk, and
-// TurnEnd, so reading three events reaches the terminal event.
+// drainTurn reads events until the turn settles. It keeps the tests independent
+// of how many non-terminal events a turn emits.
+func drainTurn(t *testing.T, ag *Agent) []Event {
+	t.Helper()
+	var events []Event
+	timeout := time.After(time.Second)
+	for {
+		select {
+		case ev := <-ag.Events():
+			events = append(events, ev)
+			switch ev.(type) {
+			case TurnEnd, TurnFailed:
+				return events
+			}
+		case <-timeout:
+			t.Fatal("timed out waiting for the turn to settle")
+		}
+	}
+}
+
+// A successful Turn emits TurnStart, one delta per chunk, ContextUsage when
+// the provider reports prompt tokens, then TurnEnd.
 func TestTurnEndCarriesUsage(t *testing.T) {
 	ag := New(&fakeStreamer{chunks: []llm.Chunk{
 		llm.ResponseStart{},
@@ -77,8 +98,8 @@ func TestTurnEndCarriesUsage(t *testing.T) {
 	}
 
 	var end TurnEnd
-	for i := 0; i < 3; i++ {
-		if te, ok := (<-ag.Events()).(TurnEnd); ok {
+	for _, ev := range drainTurn(t, ag) {
+		if te, ok := ev.(TurnEnd); ok {
 			end = te
 		}
 	}
@@ -111,8 +132,8 @@ func TestTurnFailedCarriesUsage(t *testing.T) {
 	}
 
 	var failed TurnFailed
-	for i := 0; i < 3; i++ {
-		if tf, ok := (<-ag.Events()).(TurnFailed); ok {
+	for _, ev := range drainTurn(t, ag) {
+		if tf, ok := ev.(TurnFailed); ok {
 			failed = tf
 		}
 	}

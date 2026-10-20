@@ -51,6 +51,13 @@ type ToolCallEnd struct {
 	Arguments string
 }
 
+// ContextUsage reports the input-token count of the most recent model request:
+// how much of the model's context window that request occupied. It is emitted
+// once per model call, including a call that then fails.
+type ContextUsage struct {
+	Tokens int
+}
+
 // TurnEnd marks a successfully completed turn and carries the assembled Turn,
 // plus this turn's usage and the session total. A zero Usage.TotalTokens means
 // the provider reported no usage.
@@ -69,6 +76,7 @@ type TurnFailed struct {
 }
 
 func (TurnStart) agentEventType() string      { return "turn_start" }
+func (ContextUsage) agentEventType() string   { return "context_usage" }
 func (ReasoningDelta) agentEventType() string { return "reasoning_delta" }
 func (ReasoningSummaryDelta) agentEventType() string {
 	return "reasoning_summary_delta"

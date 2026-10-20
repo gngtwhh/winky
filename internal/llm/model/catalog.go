@@ -18,6 +18,9 @@ type catalogEntry struct {
 	Protocol string `json:"protocol"`
 	BaseURL  string `json:"baseUrl,omitempty"`
 	Family   string `json:"family,omitempty"`
+	// ContextWindow is the model's context window in tokens. It is optional
+	// metadata: zero means the window is unknown.
+	ContextWindow int `json:"contextWindow,omitempty"`
 }
 
 var (

@@ -97,6 +97,12 @@ type model struct {
 	usage      llm.TokenUsage
 	totalUsage llm.TokenUsage
 
+	// Context usage: the most recent request's input-token count and the
+	// model's context window. Zero contextWindow means unknown; the gauge is
+	// hidden then.
+	contextTokens int
+	contextWindow int
+
 	// Status line.
 	status  string
 	err     error

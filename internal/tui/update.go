@@ -194,6 +194,8 @@ func (m *model) handleEvent(e agent.Event) tea.Cmd {
 			m.started = time.Now()
 		}
 		m.usage = llm.TokenUsage{}
+		// contextTokens intentionally survives: context is cumulative across
+		// turns, and the next ContextUsage event refreshes it.
 		// Live cards left over mean the previous turn never delivered a
 		// TurnEnd/TurnFailed; fold them so two live blocks cannot coexist.
 		m.freezeLiveCards()
@@ -250,6 +252,14 @@ func (m *model) handleEvent(e agent.Event) tea.Cmd {
 		m.history[idx].IsError = ev.IsError
 		m.history[idx].Duration = ev.Duration
 		m.dirty = true
+
+	case agent.ContextUsage:
+		if m.cancelled[m.turn] {
+			return nil
+		}
+		// Recorded even when the command result already settled this turn:
+		// the event may be delivered after turnResult.
+		m.contextTokens = ev.Tokens
 
 	case agent.TurnEnd:
 		if m.cancelled[m.turn] {

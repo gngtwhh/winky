@@ -10,6 +10,9 @@ type Model struct {
 	BaseURL  string
 	Name     string
 	Protocol string
+	// ContextWindow is the model's context window in tokens. Zero means
+	// unknown; callers may leave it unset and provide it from configuration.
+	ContextWindow int
 }
 
 // lookup search for model information in the directory.
@@ -33,10 +36,11 @@ func lookup(modelName string) (Model, error) {
 
 	if ce, ok := catalog[modelName]; ok {
 		return Model{
-			Provider: ce.Provider,
-			BaseURL:  ce.BaseURL,
-			Name:     modelName,
-			Protocol: ce.Protocol,
+			Provider:      ce.Provider,
+			BaseURL:       ce.BaseURL,
+			Name:          modelName,
+			Protocol:      ce.Protocol,
+			ContextWindow: ce.ContextWindow,
 		}, nil
 	}
 
@@ -51,10 +55,11 @@ func lookup(modelName string) (Model, error) {
 
 	if bestFamily != "" {
 		return Model{
-			Provider: bestEntry.Provider,
-			BaseURL:  bestEntry.BaseURL,
-			Name:     modelName,
-			Protocol: bestEntry.Protocol,
+			Provider:      bestEntry.Provider,
+			BaseURL:       bestEntry.BaseURL,
+			Name:          modelName,
+			Protocol:      bestEntry.Protocol,
+			ContextWindow: bestEntry.ContextWindow,
 		}, nil
 	}
 
@@ -69,12 +74,17 @@ func Fix(m *Model) error {
 		return errors.New("model: name is required")
 	}
 
-	if m.Provider != "" && m.Protocol != "" {
+	if m.Provider != "" && m.Protocol != "" && m.ContextWindow != 0 {
 		return nil
 	}
 
 	info, err := lookup(m.Name)
 	if err != nil {
+		// An explicit provider and protocol are enough to run without a
+		// catalog; the context window then stays unknown.
+		if m.Provider != "" && m.Protocol != "" {
+			return nil
+		}
 		if errors.Is(err, ErrNotInCatalog) && m.Protocol != "" {
 			return nil
 		}
@@ -89,6 +99,9 @@ func Fix(m *Model) error {
 	}
 	if m.BaseURL == "" {
 		m.BaseURL = info.BaseURL
+	}
+	if m.ContextWindow == 0 {
+		m.ContextWindow = info.ContextWindow
 	}
 	return nil
 }

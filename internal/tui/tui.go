@@ -31,6 +31,7 @@ type Tui struct {
 	altScreen       bool
 	expandReasoning bool
 	policy          *tool.Policy
+	contextWindow   int
 
 	evCh chan AgentEvent
 	m    model
@@ -55,6 +56,12 @@ func WithModelLabel(label string) Option { return func(t *Tui) { t.modelLabel = 
 
 // WithWorkDir sets the working directory shown in the header.
 func WithWorkDir(dir string) Option { return func(t *Tui) { t.workDir = dir } }
+
+// WithContextWindow sets the model's context window in tokens. Zero means
+// unknown, in which case the TUI hides the context-usage gauge.
+func WithContextWindow(tokens int) Option {
+	return func(t *Tui) { t.contextWindow = tokens }
+}
 
 // WithAltScreen toggles the alternate screen buffer (default true).
 func WithAltScreen(on bool) Option { return func(t *Tui) { t.altScreen = on } }
@@ -90,6 +97,7 @@ func New(ag Agent, opts ...Option) *Tui {
 	t.m.altScreen = t.altScreen
 	t.m.workDir = t.workDir
 	t.m.policy = t.policy
+	t.m.contextWindow = t.contextWindow
 	if home, err := os.UserHomeDir(); err == nil {
 		t.m.home = home
 	}

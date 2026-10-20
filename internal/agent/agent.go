@@ -108,6 +108,11 @@ func (a *Agent) Turn(ctx context.Context, input string) (Turn, error) {
 
 		resp, usage, err := a.stream(ctx, req)
 		turnUsage = turnUsage.Add(usage)
+		if usage.PromptTokens > 0 {
+			// The prompt-token count is the exact size of the request just
+			// sent, so it is the best available measure of context usage.
+			a.emit(ContextUsage{Tokens: usage.PromptTokens})
+		}
 		if err != nil {
 			return Turn{}, a.fail(err, turnUsage)
 		}

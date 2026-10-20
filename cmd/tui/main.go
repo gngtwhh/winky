@@ -47,6 +47,11 @@ func main() {
 	if err := model.Fix(m); err != nil {
 		log.Fatalf("resolve model %q: %v", cfg.Provider.Model, err)
 	}
+	// An explicit config value is the generic override for models whose
+	// window is not in the catalog.
+	if cfg.Provider.ContextWindow > 0 {
+		m.ContextWindow = cfg.Provider.ContextWindow
+	}
 
 	streamer, err := api.New(m, api.Config{ApiKey: cfg.Provider.APIKey})
 	if err != nil {
@@ -74,6 +79,7 @@ func main() {
 		tui.WithModelLabel(label),
 		tui.WithWorkDir(cfg.Cwd),
 		tui.WithPolicy(policy),
+		tui.WithContextWindow(m.ContextWindow),
 	)
 	if err := t.Run(ctx); err != nil && !errors.Is(err, tea.ErrProgramKilled) {
 		log.Fatalf("tui: %v", err)

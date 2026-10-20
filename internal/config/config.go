@@ -23,6 +23,9 @@ type ProviderConfig struct {
 	BaseURL         string `json:"baseUrl"`
 	Model           string `json:"model"`
 	MaxOutputTokens int    `json:"maxOutputTokens,omitempty"`
+	// ContextWindow is the model's context window in tokens. Zero means
+	// unknown, which hides the TUI's context-usage gauge.
+	ContextWindow int `json:"contextWindow,omitempty"`
 }
 
 type AgentConfig struct {

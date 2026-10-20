@@ -43,6 +43,23 @@ func formatUsage(u llm.TokenUsage) string {
 	return out
 }
 
+// formatContextUsage renders "ctx 40%" from the most recent request's prompt
+// tokens and the model's context window. It returns "" when either value is
+// unknown, so the usage row keeps its previous form.
+func formatContextUsage(tokens, window int) string {
+	if tokens <= 0 || window <= 0 {
+		return ""
+	}
+	pct := (tokens*100 + window/2) / window
+	if pct < 1 {
+		pct = 1
+	}
+	if pct > 100 {
+		pct = 100
+	}
+	return fmt.Sprintf("ctx %d%%", pct)
+}
+
 // fitToWidth returns the first candidate that fits within width columns, or
 // the last candidate truncated with an ellipsis.
 func fitToWidth(candidates []string, width int) string {

@@ -91,6 +91,9 @@ func (m model) statusView() string {
 
 func (m model) usageView() string {
 	left := "This turn " + formatUsage(m.usage)
+	if ctx := formatContextUsage(m.contextTokens, m.contextWindow); ctx != "" {
+		left = ctx + " · " + left
+	}
 	right := "Total " + formatUsage(m.totalUsage)
 	return m.style.Status.Render(pair(left, right, max(minViewportWidth, m.width)))
 }
