@@ -15,6 +15,9 @@ import (
 // lets tests inject a scripted event channel without a real LLM.
 type Agent interface {
 	Turn(ctx context.Context, input string) (schema.Turn, error)
+	// Compact summarizes the oldest history on demand; false means there was
+	// nothing to replace.
+	Compact(ctx context.Context) (bool, error)
 	Events() <-chan schema.Event
 }
 

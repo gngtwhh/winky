@@ -91,7 +91,14 @@ func main() {
 		}
 	}()
 
-	a, err := newAgent(streamer, cfg, *promptPath, reg, rec)
+	if cfg.Agent.Compaction.Enabled && m.ContextWindow <= 0 {
+		log.Printf(
+			"context compaction will not run: the context window is unknown; " +
+				"set provider.contextWindow in config.json or add contextWindow to the catalog",
+		)
+	}
+
+	a, err := newAgent(streamer, cfg, *promptPath, reg, rec, m.ContextWindow)
 	if err != nil {
 		log.Fatalf("create agent: %v", err)
 	}
@@ -120,16 +127,27 @@ func main() {
 // prefix the conversation always repeats, it is also what makes provider-side
 // prompt caching pay off: a short chat never reaches the minimum cacheable
 // prefix, and its cache rate then stays at "—" for the whole session.
-func newAgent(streamer llm.Streamer, cfg *config.Config, promptPath string, tools agent.Toolset, rec transcript.Recorder) (*agent.Agent, error) {
+func newAgent(streamer llm.Streamer, cfg *config.Config, promptPath string, tools agent.Toolset, rec transcript.Recorder, contextWindow int) (*agent.Agent, error) {
 	maxOutputTokens := cfg.Provider.MaxOutputTokens
 	if maxOutputTokens <= 0 {
 		maxOutputTokens = config.DefaultMaxOutputTokens
 	}
 
+	comp := cfg.Agent.Compaction
 	opts := []agent.Option{
 		agent.WithModel(cfg.Provider.Model),
 		agent.WithTemperature(cfg.Agent.Temperature),
 		agent.WithMaxOutputTokens(maxOutputTokens),
+		agent.WithContextWindow(contextWindow),
+		agent.WithCompaction(agent.CompactionOptions{
+			Enabled:          comp.Enabled,
+			TriggerPercent:   comp.TriggerPercent,
+			HardPercent:      comp.HardPercent,
+			KeepPercent:      comp.KeepPercent,
+			MaxPromptTokens:  comp.MaxPromptTokens,
+			MaxSummaryTokens: comp.MaxSummaryTokens,
+			Model:            comp.Model,
+		}),
 	}
 	if tools != nil {
 		opts = append(opts, agent.WithTools(tools))

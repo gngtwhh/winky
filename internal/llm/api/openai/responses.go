@@ -333,6 +333,15 @@ func convertMessagesToInput(msgs []llm.Message) (responses.ResponseNewParamsInpu
 				)
 			}
 
+		case llm.RoleSystem:
+			// A summary comes as a system message, keeping Instructions as the
+			// stable cached prefix.
+			items = append(
+				items, responses.ResponseInputItemParamOfMessage(
+					m.Content, responses.EasyInputMessageRoleSystem,
+				),
+			)
+
 		case llm.RoleToolOutput:
 			items = append(
 				items, responses.ResponseInputItemUnionParam{
@@ -344,6 +353,12 @@ func convertMessagesToInput(msgs []llm.Message) (responses.ResponseNewParamsInpu
 					},
 				},
 			)
+
+		default:
+			// An unknown role is an error: dropping it would desync the request
+			// history from the transcript.
+			return responses.ResponseNewParamsInputUnion{},
+				fmt.Errorf("openai-responses: unsupported message role %q", m.Role)
 		}
 	}
 

@@ -22,6 +22,13 @@ type turnResult struct {
 	Duration time.Duration
 }
 
+// compactResult is what the tea.Cmd running a manual compaction resolves to.
+// The visible result arrives as ContextCompacted; this only carries the outcome.
+type compactResult struct {
+	Changed bool
+	Err     error
+}
+
 // tickMsg requests a coalesced re-render of streamed deltas.
 type tickMsg struct {
 	ID int

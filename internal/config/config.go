@@ -29,8 +29,21 @@ type ProviderConfig struct {
 }
 
 type AgentConfig struct {
-	AgentDir    string  `json:"agentDir"`
-	Temperature float64 `json:"temperature,omitempty"`
+	AgentDir    string           `json:"agentDir"`
+	Temperature float64          `json:"temperature,omitempty"`
+	Compaction  CompactionConfig `json:"compaction"`
+}
+
+// CompactionConfig tunes automatic context compaction; zero fields fall back to
+// the defaults in DefaultConfig.
+type CompactionConfig struct {
+	Enabled          bool   `json:"enabled"`
+	TriggerPercent   int    `json:"triggerPercent,omitempty"`
+	HardPercent      int    `json:"hardPercent,omitempty"`
+	KeepPercent      int    `json:"keepPercent,omitempty"`
+	MaxPromptTokens  int    `json:"maxPromptTokens,omitempty"`
+	MaxSummaryTokens int    `json:"maxSummaryTokens,omitempty"`
+	Model            string `json:"model,omitempty"`
 }
 
 // Load loads config.json and .env files

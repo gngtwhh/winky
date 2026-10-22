@@ -43,6 +43,17 @@ type Agent struct {
 	historyLoaded bool
 
 	tsRecorder transcript.Recorder
+
+	// Context compaction.
+	compact       CompactionOptions
+	contextWindow int
+	toolTokens    int
+
+	// Prompt-size anchors: the provider's last count and the local estimate of
+	// that same request. Only the difference since then is estimated later.
+	lastPromptTokens    int
+	lastPromptEstimate  int
+	compactionsThisTurn int
 }
 
 // Option configures an Agent.
@@ -86,6 +97,10 @@ func New(streamer llm.Streamer, opts ...Option) *Agent {
 	for _, opt := range opts {
 		opt(a)
 	}
+	a.normalizeCompaction()
+	if a.tools != nil {
+		a.toolTokens = estimateTools(a.tools)
+	}
 	a.events = make(chan schema.Event, 32)
 	if a.tsRecorder == nil {
 		a.historyLoaded = true
@@ -110,15 +125,29 @@ func (a *Agent) Turn(ctx context.Context, input string) (Turn, error) {
 	if err := a.record(transcript.TurnStart{Timestamp: startTime}); err != nil {
 		return Turn{}, a.fail(err, turnUsage)
 	}
+	a.emit(schema.TurnStart{Timestamp: startTime})
+
+	// Compact before the user message is recorded, so this turn is never
+	// summarized.
+	a.compactionsThisTurn = 0
+	if err := a.maybeCompact(ctx, false); err != nil {
+		return Turn{}, a.fail(err, turnUsage)
+	}
 	if err := a.record(transcript.UserMessage{Content: input}); err != nil {
 		return Turn{}, a.fail(err, turnUsage)
 	}
 
-	a.emit(schema.TurnStart{Timestamp: startTime})
-
 	for step := 0; ; step++ {
 		if step >= maxSteps {
 			return Turn{}, a.fail(fmt.Errorf("turn exceeded %d model calls", maxSteps), turnUsage)
+		}
+
+		// The previous step is closed, so the history is still whole tool-call
+		// groups here.
+		if step > 0 {
+			if err := a.maybeCompact(ctx, true); err != nil {
+				return Turn{}, a.fail(err, turnUsage)
+			}
 		}
 
 		if err := a.record(transcript.StepStart{Timestamp: time.Now()}); err != nil {
@@ -141,6 +170,8 @@ func (a *Agent) Turn(ctx context.Context, input string) (Turn, error) {
 		if usage.PromptTokens > 0 {
 			// The prompt-token count is the exact size of the request just
 			// sent, so it is the best available measure of context usage.
+			a.lastPromptTokens = usage.PromptTokens
+			a.lastPromptEstimate = a.estimateRequest(req.Messages)
 			a.emit(schema.ContextUsage{Tokens: usage.PromptTokens})
 		}
 		if err != nil {
@@ -201,9 +232,13 @@ func (a *Agent) Turn(ctx context.Context, input string) (Turn, error) {
 // record persists one event and folds it into the request-history projection.
 func (a *Agent) record(ev transcript.Event) error {
 	if a.tsRecorder != nil {
-		if err := a.tsRecorder.Append(ev); err != nil {
+		sequenced, err := a.tsRecorder.Append(ev)
+		if err != nil {
 			return fmt.Errorf("transcript append %s: %w", ev.Type(), err)
 		}
+		// Fold the sequenced copy: compaction ranges use those numbers, so live
+		// and replay must agree on them.
+		ev = sequenced
 	}
 	if err := a.history.Apply(ev); err != nil {
 		return fmt.Errorf("apply transcript %s: %w", ev.Type(), err)

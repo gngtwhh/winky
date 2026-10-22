@@ -65,10 +65,11 @@ type blockKey struct {
 
 type model struct {
 	// Dependencies and lifecycle.
-	ag        Agent
-	ctx       context.Context
-	eventChan chan AgentEvent
-	turnCanc  context.CancelFunc
+	ag          Agent
+	ctx         context.Context
+	eventChan   chan AgentEvent
+	turnCanc    context.CancelFunc
+	compactCanc context.CancelFunc
 
 	// Layout.
 	width, height   int

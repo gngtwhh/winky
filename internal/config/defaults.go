@@ -24,6 +24,13 @@ func DefaultConfig() *Config {
 		Agent: AgentConfig{
 			AgentDir:    path.Join(home, DefaultAgentDirBase),
 			Temperature: DefaultTemperature,
+			Compaction: CompactionConfig{
+				Enabled:          true,
+				TriggerPercent:   80,
+				HardPercent:      92,
+				KeepPercent:      30,
+				MaxSummaryTokens: 1024,
+			},
 		},
 		LogLevel: DefaultLogLevel,
 		Cwd:      mustGetWd(),

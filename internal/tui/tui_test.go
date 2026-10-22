@@ -25,6 +25,8 @@ type fakeAgent struct {
 	mu    sync.Mutex
 	turns []string
 	err   error
+
+	compacts int
 }
 
 func newFakeAgent() *fakeAgent {
@@ -39,6 +41,20 @@ func (f *fakeAgent) Turn(_ context.Context, input string) (agent.Turn, error) {
 }
 
 func (f *fakeAgent) Events() <-chan schema.Event { return f.ch }
+
+// Compact records a manual compaction request.
+func (f *fakeAgent) Compact(_ context.Context) (bool, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.compacts++
+	return true, nil
+}
+
+func (f *fakeAgent) compactCount() int {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.compacts
+}
 
 func (f *fakeAgent) turnCount() int {
 	f.mu.Lock()
@@ -561,6 +577,62 @@ func TestHeaderShowsWorkDir(t *testing.T) {
 	m.home = "C:/Users/me"
 	if got := m.headerView(); !strings.Contains(got, "winky · test/model · D:/data/code") {
 		t.Fatalf("header = %q, want model and workdir", got)
+	}
+}
+
+// /compact runs a manual compaction and clears the status when it succeeds.
+func TestCompactCommand(t *testing.T) {
+	ag := newFakeAgent()
+	m := newTestModel(t, ag)
+
+	m.input.SetValue("/compact")
+	next, cmd := m.Update(keyPress(tea.KeyEnter, 0))
+	m = next.(model)
+	if cmd == nil {
+		t.Fatal("/compact did not start a command")
+	}
+	if m.status != "compacting..." {
+		t.Fatalf("status = %q, want compacting...", m.status)
+	}
+
+	msg := cmd()
+	res, ok := msg.(compactResult)
+	if !ok {
+		t.Fatalf("command returned %T, want compactResult", msg)
+	}
+	if ag.compactCount() != 1 {
+		t.Fatalf("Compact calls = %d, want 1", ag.compactCount())
+	}
+
+	next, _ = m.Update(res)
+	m = next.(model)
+	if m.status != "" {
+		t.Fatalf("status = %q after a successful compaction", m.status)
+	}
+}
+
+// /compact is refused mid-turn, and a no-op is reported instead of silently
+// doing nothing.
+func TestCompactRefusedWhileStreaming(t *testing.T) {
+	ag := newFakeAgent()
+	m := newTestModel(t, ag)
+	m.streaming = true
+
+	m.input.SetValue("/compact")
+	next, cmd := m.Update(keyPress(tea.KeyEnter, 0))
+	m = next.(model)
+	if cmd != nil || ag.compactCount() != 0 {
+		t.Fatalf("compaction ran while streaming: cmd=%v calls=%d", cmd, ag.compactCount())
+	}
+	if m.status != "wait for the current turn to finish" {
+		t.Fatalf("status = %q", m.status)
+	}
+
+	m.streaming = false
+	next, _ = m.Update(compactResult{Changed: false})
+	m = next.(model)
+	if m.status != "nothing to compact" {
+		t.Fatalf("status = %q, want nothing to compact", m.status)
 	}
 }
 

@@ -68,6 +68,14 @@ func doTurn(ctx context.Context, ag Agent, id int, input string) tea.Cmd {
 	}
 }
 
+// doCompact runs one manual compaction off the update loop.
+func doCompact(ctx context.Context, ag Agent) tea.Cmd {
+	return func() tea.Msg {
+		changed, err := ag.Compact(ctx)
+		return compactResult{Changed: changed, Err: err}
+	}
+}
+
 // tickCmd drives the deferred rebuild while streaming.
 func tickCmd(id int) tea.Cmd {
 	return tea.Tick(tickInterval, func(time.Time) tea.Msg {

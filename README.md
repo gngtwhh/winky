@@ -12,6 +12,7 @@ The project is early-stage and focuses on the agent loop, tool permissions, and 
 - Permission levels with per-action approval
 - JSONL session transcripts stored locally
 - Request history projected from the transcript
+- Automatic context compaction with a summarized handover
 - Model catalog and OpenAI Responses-compatible client
 - Optional system prompt and token/context usage display
 
@@ -68,6 +69,7 @@ Minimal configuration:
 | `provider.maxOutputTokens` | Maximum output tokens per request |
 | `provider.contextWindow` | Optional context window override, used for the TUI usage display |
 | `agent.temperature` | Sampling temperature |
+| `agent.compaction` | Automatic context compaction settings; see [Context compaction](#context-compaction) |
 | `agent.agentDir` | Optional session directory root; defaults to `~/.winky` |
 | `cwd` | Optional workspace root and `.env` lookup directory; defaults to the current directory |
 
@@ -119,6 +121,7 @@ Available commands:
 | `/readonly` | Read-only mode |
 | `/workspace` or `/write` | Workspace read/write mode |
 | `/full` | Full access, including outside paths, shell, and network |
+| `/compact` | Summarize old turns now, without waiting for the threshold |
 
 When an approval prompt appears:
 
@@ -151,11 +154,58 @@ Each launch creates a new session:
 
 Each run starts a new session. `--resume` is not implemented yet.
 
+## Context compaction
+
+A long conversation eventually outgrows the model's context window. When the
+projected request reaches `agent.compaction.triggerPercent` of the usable window
+(the window minus `maxOutputTokens`), winky summarizes the oldest turns and
+appends a `compaction_summary` event to the transcript. The recent turns are
+kept verbatim.
+
+- The summary is sent as a system message, so `instructions` (the system
+  prompt) stays the stable prefix that provider-side caching relies on.
+- The transcript stays append-only: compaction changes what is *sent* to the
+  model, not what is stored on disk.
+- Compaction is bounded per turn: at most one check at the turn boundary and
+  one between steps, so it cannot loop on its own model calls.
+- Automatic compaction needs a known window; set `provider.contextWindow` or
+  add `contextWindow` to the model's `catalog.json` entry. Otherwise it is
+  skipped.
+- `/compact` runs the same compaction on demand. It ignores the thresholds and
+  the `enabled` switch, keeps roughly a quarter of the current context, and
+  reports "nothing to compact" when the history already fits.
+
+```json
+{
+  "agent": {
+    "compaction": {
+      "enabled": true,
+      "triggerPercent": 80,
+      "hardPercent": 92,
+      "keepPercent": 30,
+      "maxPromptTokens": 0,
+      "maxSummaryTokens": 1024,
+      "model": ""
+    }
+  }
+}
+```
+
+| Field | Description |
+| --- | --- |
+| `enabled` | Turn automatic compaction on |
+| `triggerPercent` | Threshold as a percentage of the usable window, checked before a turn starts |
+| `hardPercent` | Higher threshold checked between the steps of one turn |
+| `keepPercent` | Share of the trigger threshold kept verbatim, measured from the newest turn back |
+| `maxPromptTokens` | Optional absolute cap on the trigger threshold; `0` disables the cap |
+| `maxSummaryTokens` | Cap on the generated summary |
+| `model` | Model used for the summary; empty reuses `provider.model` |
+
 ## Project layout
 
 ```text
 cmd/tui/                    entry point and agent wiring
-internal/agent/             agent loop and history projection
+internal/agent/             agent loop, history projection, and context compaction
 internal/llm/               request/response types and OpenAI Responses client
 internal/llm/api/           provider adapters
 internal/tool/              filesystem, shell, web tools and permission policy
@@ -178,7 +228,7 @@ go test ./...
 
 - Only the `openai-responses` protocol is supported; other protocols in `catalog.json` are not wired up.
 - Only new sessions are supported, with no resume.
-- Context compaction is not implemented.
+- Compaction keeps the full history on disk: it changes the request, not `transcript.jsonl`.
+- Compaction only cuts at turn or step boundaries, so a request that is still too large after compacting fails with an error instead of dropping context silently.
 - The transcript writer assumes a single process; there is no file locking.
-- Long conversations are limited by the model's context window.
 - The project is early-stage, so APIs and behavior may change.

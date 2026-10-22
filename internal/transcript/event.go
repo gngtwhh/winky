@@ -61,11 +61,19 @@ type ToolResult struct {
 
 func (e ToolResult) Type() string { return "tool_result" }
 
+// CompactionSummary replaces the history prefix whose event sequences fall in
+// [ReplacedStartSeq, ReplacedEndSeq] with Summary. The summary takes over
+// ReplacedStartSeq, so entries stay ordered and a later range covers it again.
 type CompactionSummary struct {
 	baseEvent
-	Summary          string `json:"summary"`
-	ReplacedStartSeq int64  `json:"replaced_start_seq"`
-	ReplacedEndSeq   int64  `json:"replaced_end_seq"`
+	Summary          string    `json:"summary"`
+	ReplacedStartSeq int64     `json:"replaced_start_seq"`
+	ReplacedEndSeq   int64     `json:"replaced_end_seq"`
+	Timestamp        time.Time `json:"timestamp"`
+	Kind             string    `json:"kind,omitempty"` // auto_turn, auto_step
+	Model            string    `json:"model,omitempty"`
+	TokensBefore     int       `json:"tokens_before,omitempty"`
+	TokensAfter      int       `json:"tokens_after,omitempty"`
 }
 
 func (e CompactionSummary) Type() string { return "compaction_summary" }

@@ -7,13 +7,24 @@ import (
 	"winky/internal/transcript"
 )
 
-// historyProjection materializes the request history from transcript events.
-// The transcript is the source of truth; this type is only an in-memory view
-// used to build llm.Request.Messages.
+// historyEntry pairs one request message with the sequence of the event that
+// produced it; compaction ranges address those sequences.
+type historyEntry struct {
+	seq int64
+	msg llm.Message
+}
+
+// historyProjection materializes the request history from transcript events,
+// the source of truth. Entries stay ordered by sequence: a compaction summary
+// takes over the sequence of the first entry it replaces.
 type historyProjection struct {
-	messages []llm.Message
-	pending  map[string]string // tool call ID -> tool name
-	lastSeq  int64
+	entries []historyEntry
+	// turns and steps hold the sequences compaction may cut before: a user
+	// message starts a turn, a step start starts a step.
+	turns   []int64
+	steps   []int64
+	pending map[string]string // tool call ID -> tool name
+	lastSeq int64
 }
 
 func newHistoryProjection() *historyProjection {
@@ -42,13 +53,19 @@ func (h *historyProjection) Apply(ev transcript.Event) error {
 		h.pending = make(map[string]string)
 
 	case transcript.UserMessage:
-		h.messages = append(h.messages, llm.Message{
+		h.append(ev, llm.Message{
 			Role:    llm.RoleUser,
 			Content: e.Content,
 		})
+		if seq := ev.Seq(); seq > 0 {
+			h.turns = append(h.turns, seq)
+		}
 
 	case transcript.StepStart:
 		h.pending = make(map[string]string)
+		if seq := ev.Seq(); seq > 0 {
+			h.steps = append(h.steps, seq)
+		}
 
 	case transcript.AssistantOutputMessage:
 		if e.Content == "" && len(e.ToolCalls) == 0 {
@@ -63,7 +80,7 @@ func (h *historyProjection) Apply(ev transcript.Event) error {
 			})
 			h.pending[tc.CallID] = tc.Name
 		}
-		h.messages = append(h.messages, msg)
+		h.append(ev, msg)
 
 	case transcript.AssistantReasoningMessage, transcript.AssistantReasoningSummary:
 		// Reasoning is persisted for auditing but is not part of the
@@ -76,7 +93,7 @@ func (h *historyProjection) Apply(ev transcript.Event) error {
 			// enter the request history.
 			return nil
 		}
-		h.messages = append(h.messages, llm.Message{
+		h.append(ev, llm.Message{
 			Role:       llm.RoleToolOutput,
 			Name:       name,
 			ToolCallID: e.CallID,
@@ -92,8 +109,9 @@ func (h *historyProjection) Apply(ev transcript.Event) error {
 		h.pending = make(map[string]string)
 
 	case transcript.CompactionSummary:
-		// Compaction projection is intentionally deferred until the compaction
-		// feature writes these events.
+		if err := h.applyCompaction(e); err != nil {
+			return err
+		}
 
 	default:
 		return fmt.Errorf("history: unsupported transcript event %q", ev.Type())
@@ -101,13 +119,95 @@ func (h *historyProjection) Apply(ev transcript.Event) error {
 	return nil
 }
 
+// append records one message under the sequence of the event that produced it.
+func (h *historyProjection) append(ev transcript.Event, msg llm.Message) {
+	h.entries = append(h.entries, historyEntry{seq: ev.Seq(), msg: msg})
+}
+
+// applyCompaction replaces the prefix addressed by the event with its summary.
+// A range that does not cover a prefix, or that splits a tool-call group, is
+// rejected; a range matching no entry is ignored.
+func (h *historyProjection) applyCompaction(e transcript.CompactionSummary) error {
+	if len(h.pending) > 0 {
+		return fmt.Errorf(
+			"history: compaction %d..%d while %d tool call(s) are pending",
+			e.ReplacedStartSeq, e.ReplacedEndSeq, len(h.pending),
+		)
+	}
+	start, end := e.ReplacedStartSeq, e.ReplacedEndSeq
+	if start <= 0 || end < start {
+		return fmt.Errorf("history: invalid compaction range %d..%d", start, end)
+	}
+
+	kept := 0
+	for kept < len(h.entries) {
+		seq := h.entries[kept].seq
+		if seq < start || seq > end {
+			break
+		}
+		kept++
+	}
+	if kept == 0 {
+		return nil
+	}
+	for _, en := range h.entries[kept:] {
+		if en.seq <= end {
+			return fmt.Errorf(
+				"history: compaction range %d..%d does not cover a prefix", start, end,
+			)
+		}
+	}
+	if kept < len(h.entries) && h.entries[kept].msg.Role == llm.RoleToolOutput {
+		// Cutting here would leave an orphan tool result.
+		return fmt.Errorf(
+			"history: compaction range %d..%d splits a tool call group", start, end,
+		)
+	}
+
+	next := make([]historyEntry, 0, len(h.entries)-kept+1)
+	next = append(next, historyEntry{
+		seq: start,
+		msg: llm.Message{Role: llm.RoleSystem, Content: e.Summary},
+	})
+	next = append(next, h.entries[kept:]...)
+	h.entries = next
+	h.trimUnits(end)
+	return nil
+}
+
+// trimUnits drops the boundaries that the replaced range covered.
+func (h *historyProjection) trimUnits(end int64) {
+	h.turns = trimSeqs(h.turns, end)
+	h.steps = trimSeqs(h.steps, end)
+}
+
+func trimSeqs(seqs []int64, end int64) []int64 {
+	i := 0
+	for i < len(seqs) && seqs[i] <= end {
+		i++
+	}
+	if i == 0 {
+		return seqs
+	}
+	return seqs[i:]
+}
+
+// snapshot exposes the projection for planning; the slices are read-only.
+func (h *historyProjection) snapshot() (entries []historyEntry, turns, steps []int64) {
+	return h.entries, h.turns, h.steps
+}
+
 // Messages returns the request-safe view of the projection. It drops incomplete
-// trailing tool-call groups and orphan tool results, so a failed turn can never
-// leave the next request with an unanswered function call.
+// tool-call groups and orphan tool results, so a failed turn can never leave the
+// next request with an unanswered function call.
 func (h *historyProjection) Messages() []llm.Message {
-	out := make([]llm.Message, 0, len(h.messages))
-	for i := 0; i < len(h.messages); {
-		msg := h.messages[i]
+	return messagesOf(h.entries)
+}
+
+func messagesOf(entries []historyEntry) []llm.Message {
+	out := make([]llm.Message, 0, len(entries))
+	for i := 0; i < len(entries); {
+		msg := entries[i].msg
 		if msg.Role == llm.RoleToolOutput {
 			// Orphan tool output; valid groups are consumed below.
 			i++
@@ -127,8 +227,8 @@ func (h *historyProjection) Messages() []llm.Message {
 		have := make(map[string]bool, len(msg.ToolCalls))
 		group := make([]llm.Message, 0, len(msg.ToolCalls))
 		j := i + 1
-		for j < len(h.messages) && h.messages[j].Role == llm.RoleToolOutput {
-			result := h.messages[j]
+		for j < len(entries) && entries[j].msg.Role == llm.RoleToolOutput {
+			result := entries[j].msg
 			if expected[result.ToolCallID] {
 				have[result.ToolCallID] = true
 				group = append(group, result)

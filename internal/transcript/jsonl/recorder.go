@@ -105,30 +105,30 @@ func (r *Recorder) scan() error {
 }
 
 // Append assigns the next sequence number, writes one JSONL record, fsyncs it,
-// and notifies subscribers. A failed write is truncated back to the previous
-// end offset.
-func (r *Recorder) Append(ev transcript.Event) error {
+// and notifies subscribers. It returns the sequenced copy that was persisted. A
+// failed write is truncated back to the previous end offset.
+func (r *Recorder) Append(ev transcript.Event) (transcript.Event, error) {
 	if ev == nil {
-		return errors.New("transcript/jsonl: cannot append a nil event")
+		return nil, errors.New("transcript/jsonl: cannot append a nil event")
 	}
 
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	if r.closed {
-		return errors.New("transcript/jsonl: recorder is closed")
+		return nil, errors.New("transcript/jsonl: recorder is closed")
 	}
 
 	seq := r.nextSeq
 	sequenced := transcript.WithSeq(ev, seq)
 	line, err := transcript.Encode(sequenced)
 	if err != nil {
-		return fmt.Errorf("transcript/jsonl: append seq %d: %w", seq, err)
+		return nil, fmt.Errorf("transcript/jsonl: append seq %d: %w", seq, err)
 	}
 	line = append(line, '\n')
 
 	offset, err := r.file.Seek(0, io.SeekEnd)
 	if err != nil {
-		return fmt.Errorf("transcript/jsonl: seek end of %s: %w", r.path, err)
+		return nil, fmt.Errorf("transcript/jsonl: seek end of %s: %w", r.path, err)
 	}
 
 	n, writeErr := r.file.Write(line)
@@ -136,7 +136,7 @@ func (r *Recorder) Append(ev transcript.Event) error {
 		if writeErr == nil {
 			writeErr = io.ErrShortWrite
 		}
-		return errors.Join(
+		return nil, errors.Join(
 			fmt.Errorf("transcript/jsonl: append seq %d: %w", seq, writeErr),
 			r.file.Truncate(offset),
 		)
@@ -145,12 +145,12 @@ func (r *Recorder) Append(ev transcript.Event) error {
 		// The bytes reached the file but their durability is unknown. Consume
 		// the sequence number so a retry cannot reuse it.
 		r.nextSeq++
-		return fmt.Errorf("transcript/jsonl: sync seq %d: %w", seq, err)
+		return nil, fmt.Errorf("transcript/jsonl: sync seq %d: %w", seq, err)
 	}
 
 	r.nextSeq++
 	r.notifyLocked(sequenced)
-	return nil
+	return sequenced, nil
 }
 
 // ReadAll returns every complete record currently in the file. A trailing

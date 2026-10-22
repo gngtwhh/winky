@@ -5,6 +5,13 @@
     "maxOutputTokens": 16384
   },
   "agent": {
-    "temperature": 0.7
+    "temperature": 0.7,
+    "compaction": {
+      "enabled": true,
+      "triggerPercent": 80,
+      "hardPercent": 92,
+      "keepPercent": 30,
+      "maxSummaryTokens": 1024
+    }
   }
 }

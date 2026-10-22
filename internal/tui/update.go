@@ -41,6 +41,9 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		next, cmd := m.handleTurnResult(msg)
 		return next, cmd
 
+	case compactResult:
+		return m.handleCompactResult(msg)
+
 	case tickMsg:
 		// The rebuild tick only flushes pending deltas; the spinner advances
 		// through its own spinner.TickMsg below.
@@ -96,6 +99,9 @@ func (m model) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		if m.turnCanc != nil {
 			m.turnCanc()
 		}
+		if m.compactCanc != nil {
+			m.compactCanc()
+		}
 		return m, tea.Quit
 
 	case key.Matches(msg, m.keys.Cancel):
@@ -103,6 +109,12 @@ func (m model) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 			// esc clears a draft first; only an empty input cancels the turn.
 			m.input.Reset()
 			m.relayoutIfNeeded()
+			return m, nil
+		}
+		if m.compactCanc != nil {
+			m.compactCanc()
+			m.compactCanc = nil
+			m.status = "compaction cancelled"
 			return m, nil
 		}
 		if m.turnCanc != nil {
@@ -261,6 +273,18 @@ func (m *model) handleEvent(e schema.Event) tea.Cmd {
 		// the event may be delivered after turnResult.
 		m.contextTokens = ev.Tokens
 
+	case schema.ContextCompacted:
+		// Not tied to a turn: a cancelled turn's id must not swallow the event,
+		// because the compaction really happened and is in the transcript.
+		m.contextTokens = ev.After
+		// The divider is the only explanation for the model forgetting earlier
+		// turns.
+		m.appendCard(card{
+			Kind: cardNotice,
+			Text: "context compacted · " + formatTokens(ev.Before) + " → " + formatTokens(ev.After),
+			At:   time.Now(),
+		})
+
 	case schema.TurnEnd:
 		if m.cancelled[m.turn] {
 			return nil
@@ -370,9 +394,13 @@ func cardKindFor(k schema.BlockKind) cardKind {
 	}
 }
 
-// applyCommand handles a "/" input: /readonly, /workspace (or /write), /full.
+// applyCommand handles a "/" input: /compact, /readonly, /workspace (or /write),
+// /full.
 func (m model) applyCommand(text string) (tea.Model, tea.Cmd) {
 	m.input.Reset()
+	if strings.TrimSpace(text) == "/compact" {
+		return m.startCompact()
+	}
 	perm, ok := parsePerm(text)
 	if !ok {
 		m.status = "unknown command: " + text
@@ -443,6 +471,50 @@ func (m model) handleTurnResult(res turnResult) (tea.Model, tea.Cmd) {
 	return m, nil
 }
 
+// startCompact runs a manual compaction in the background. The visible result
+// arrives through ContextCompacted; this only tracks completion and failure.
+func (m model) startCompact() (tea.Model, tea.Cmd) {
+	if m.ag == nil {
+		m.status = "agent is not configured"
+		return m, nil
+	}
+	if m.streaming {
+		m.status = "wait for the current turn to finish"
+		return m, nil
+	}
+	if m.compactCanc != nil {
+		m.status = "already compacting"
+		return m, nil
+	}
+
+	ctx, cancel := context.WithCancel(m.tuiContext())
+	m.compactCanc = cancel
+	m.status = "compacting..."
+	m.err = nil
+	return m, doCompact(ctx, m.ag)
+}
+
+// handleCompactResult reports why a manual compaction did or did not run. The
+// size change itself is already shown by the ContextCompacted event.
+func (m model) handleCompactResult(res compactResult) (tea.Model, tea.Cmd) {
+	m.compactCanc = nil
+	switch {
+	case res.Err == nil && res.Changed:
+		m.status = ""
+	case res.Err == nil:
+		m.status = "nothing to compact"
+	case errors.Is(res.Err, context.Canceled):
+		m.status = "compaction cancelled"
+	default:
+		m.err = res.Err
+		m.status = ""
+		m.appendCard(card{Kind: cardError, Text: res.Err.Error(), At: time.Now()})
+		return m, nil // appendCard rebuilt the view
+	}
+	m.rebuild()
+	return m, nil
+}
+
 func (m model) submit() (tea.Model, tea.Cmd) {
 	text := strings.TrimSpace(m.input.Value())
 	if text == "" {
@@ -455,6 +527,12 @@ func (m model) submit() (tea.Model, tea.Cmd) {
 		m.err = errAgentNil
 		m.status = "agent is not configured"
 		m.appendCard(card{Kind: cardNotice, Text: errAgentNil.Error(), At: time.Now()})
+		return m, nil
+	}
+	if m.compactCanc != nil {
+		// A manual compaction is in flight; a turn would race it for the
+		// history and the transcript writer.
+		m.status = "Compacting...Please wait"
 		return m, nil
 	}
 	if m.streaming {
