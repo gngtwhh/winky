@@ -37,9 +37,11 @@ type Agent struct {
 	events          chan schema.Event
 
 	totalUsage llm.TokenUsage
-	history    []llm.Message // TODO: to be improved
+	history    *historyProjection
+	// historyLoaded is false until the persisted transcript has been replayed.
+	// A nil recorder means there is nothing to load.
+	historyLoaded bool
 
-	// TODO: Migration in progress: Migrating the conversation history to the persistent implementation
 	tsRecorder transcript.Recorder
 }
 
@@ -80,11 +82,14 @@ func WithTranscriptRecorder(r transcript.Recorder) Option {
 
 // New builds an Agent around the given streamer.
 func New(streamer llm.Streamer, opts ...Option) *Agent {
-	a := &Agent{streamer: streamer}
+	a := &Agent{streamer: streamer, history: newHistoryProjection()}
 	for _, opt := range opts {
 		opt(a)
 	}
 	a.events = make(chan schema.Event, 32)
+	if a.tsRecorder == nil {
+		a.historyLoaded = true
+	}
 	return a
 }
 
@@ -99,6 +104,9 @@ func (a *Agent) Turn(ctx context.Context, input string) (Turn, error) {
 		turnUsage llm.TokenUsage
 	)
 
+	if err := a.loadHistory(); err != nil {
+		return Turn{}, a.fail(err, turnUsage)
+	}
 	if err := a.record(transcript.TurnStart{Timestamp: startTime}); err != nil {
 		return Turn{}, a.fail(err, turnUsage)
 	}
@@ -106,13 +114,6 @@ func (a *Agent) Turn(ctx context.Context, input string) (Turn, error) {
 		return Turn{}, a.fail(err, turnUsage)
 	}
 
-	// The legacy in-memory history stays in parallel with the transcript until
-	// the transcript becomes the source of truth for requests.
-	a.history = append(
-		a.history, llm.Message{
-			Role: llm.RoleUser, Content: input, Timestamp: startTime,
-		},
-	)
 	a.emit(schema.TurnStart{Timestamp: startTime})
 
 	for step := 0; ; step++ {
@@ -126,7 +127,7 @@ func (a *Agent) Turn(ctx context.Context, input string) (Turn, error) {
 
 		req := llm.Request{
 			Model:           a.model,
-			Messages:        a.history,
+			Messages:        a.history.Messages(),
 			SystemPrompt:    a.systemPrompt,
 			Temperature:     a.temperature,
 			MaxOutputTokens: a.maxOutputTokens,
@@ -154,7 +155,6 @@ func (a *Agent) Turn(ctx context.Context, input string) (Turn, error) {
 		}
 
 		turn.Blocks = append(turn.Blocks, stepTurn.Blocks...)
-		a.history = append(a.history, messageFromStep(stepTurn))
 
 		calls := stepTurn.ToolCalls()
 		if len(calls) == 0 {
@@ -182,12 +182,6 @@ func (a *Agent) Turn(ctx context.Context, input string) (Turn, error) {
 					IsError: r.IsError, Duration: r.Duration,
 				},
 			)
-			a.history = append(
-				a.history, llm.Message{
-					Role: llm.RoleToolOutput, Name: r.Name,
-					ToolCallID: r.CallID, Content: r.Output, Timestamp: time.Now(),
-				},
-			)
 		}
 
 		if err := a.record(transcript.StepEnd{Timestamp: time.Now()}); err != nil {
@@ -204,14 +198,43 @@ func (a *Agent) Turn(ctx context.Context, input string) (Turn, error) {
 	return turn, nil
 }
 
-// record appends one event to the transcript when a recorder is configured.
+// record persists one event and folds it into the request-history projection.
 func (a *Agent) record(ev transcript.Event) error {
-	if a.tsRecorder == nil {
+	if a.tsRecorder != nil {
+		if err := a.tsRecorder.Append(ev); err != nil {
+			return fmt.Errorf("transcript append %s: %w", ev.Type(), err)
+		}
+	}
+	if err := a.history.Apply(ev); err != nil {
+		return fmt.Errorf("apply transcript %s: %w", ev.Type(), err)
+	}
+	return nil
+}
+
+// loadHistory replays the persisted transcript once, before the first turn.
+// The projection is only swapped in after a clean replay, so a failed load
+// cannot leave a half-populated history behind.
+func (a *Agent) loadHistory() error {
+	if a.historyLoaded {
 		return nil
 	}
-	if err := a.tsRecorder.Append(ev); err != nil {
-		return fmt.Errorf("transcript append %s: %w", ev.Type(), err)
+	if a.tsRecorder == nil {
+		a.historyLoaded = true
+		return nil
 	}
+
+	events, err := a.tsRecorder.ReadAll()
+	if err != nil {
+		return fmt.Errorf("read transcript: %w", err)
+	}
+	h := newHistoryProjection()
+	for _, ev := range events {
+		if err := h.Apply(ev); err != nil {
+			return fmt.Errorf("replay transcript: %w", err)
+		}
+	}
+	a.history = h
+	a.historyLoaded = true
 	return nil
 }
 
@@ -353,16 +376,6 @@ func (a *Agent) fail(err error, usage llm.TokenUsage) error {
 	return err
 }
 
-// messageFromStep builds the assistant history message for one model response.
-// TODO: to be improved
-func messageFromStep(step Turn) llm.Message {
-	m := llm.Message{Role: llm.RoleAssistant, Content: step.Output(), Timestamp: time.Now()}
-	for _, b := range step.ToolCalls() {
-		m.ToolCalls = append(m.ToolCalls, llm.ToolCall{ID: b.ID, Name: b.Name, Arguments: b.Arguments})
-	}
-	return m
-}
-
 // emit sends one event to the events channel, blocking until a consumer reads
 // it. Callers must keep a reader draining the channel during every turn.
 func (a *Agent) emit(e schema.Event) {
@@ -373,10 +386,7 @@ func (a *Agent) Events() <-chan schema.Event {
 	return a.events
 }
 
-// History returns a copy of the conversation so far.
-// TODO: to be improved
+// History returns the request history projected from the transcript.
 func (a *Agent) History() []llm.Message {
-	out := make([]llm.Message, len(a.history))
-	copy(out, a.history)
-	return out
+	return a.history.Messages()
 }
