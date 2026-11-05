@@ -193,7 +193,7 @@ func TestTurnRunsToolsAndLoops(t *testing.T) {
 		t.Fatalf("output = %q, want done", turn.Output())
 	}
 
-	h := ag.History()
+	h := ag.history.Messages()
 	if len(h) != 4 {
 		t.Fatalf("history length = %d: %+v", len(h), h)
 	}

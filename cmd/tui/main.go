@@ -104,6 +104,9 @@ func main() {
 	if err != nil {
 		log.Fatalf("open transcript: %v", err)
 	}
+	for _, p := range rec.Problems() {
+		log.Printf("transcript: seq %d: %s", p.Seq, p.Message)
+	}
 	defer func() {
 		if err := rec.Close(); err != nil {
 			log.Printf("close transcript: %v", err)

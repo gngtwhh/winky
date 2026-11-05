@@ -99,8 +99,10 @@ func TestCompactionReplayMatchesLive(t *testing.T) {
 	}
 }
 
-// A range that splits a tool-call group is rejected.
-func TestCompactionRejectsSplitToolGroup(t *testing.T) {
+// A range written by something other than planCompaction may split a tool-call
+// group. It is applied as written; the request stays valid because the leftover
+// result becomes an orphan Messages drops.
+func TestCompactionSplitsToolGroupKeepsRequestValid(t *testing.T) {
 	h := newHistoryProjection()
 	events := []transcript.Event{
 		transcript.UserMessage{Content: "read it"},
@@ -115,16 +117,17 @@ func TestCompactionRejectsSplitToolGroup(t *testing.T) {
 		}
 	}
 
-	err := h.Apply(transcript.WithSeq(transcript.CompactionSummary{
+	if err := h.Apply(transcript.WithSeq(transcript.CompactionSummary{
 		Summary:          "s",
 		ReplacedStartSeq: 1,
 		ReplacedEndSeq:   2,
-	}, 4))
-	if err == nil {
-		t.Fatal("expected an error for a range that splits a tool-call group")
+	}, 4)); err != nil {
+		t.Fatalf("apply compaction: %v", err)
 	}
-	if len(h.Messages()) != 3 {
-		t.Fatalf("history changed after a rejected compaction: %+v", h.Messages())
+
+	msgs := h.Messages()
+	if len(msgs) != 1 || msgs[0].Role != llm.RoleSystem || msgs[0].Content != "s" {
+		t.Fatalf("messages = %+v, want only the summary", msgs)
 	}
 }
 

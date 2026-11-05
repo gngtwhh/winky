@@ -4,6 +4,7 @@ package agent
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"sync"
 	"time"
@@ -17,6 +18,10 @@ import (
 // maxSteps caps how many model requests one turn may make before giving up, so a
 // model that keeps asking for tools without answering cannot spin forever.
 const maxSteps = 100
+
+// ErrBusy reports a Turn or Compact that overlapped another one. Both fold
+// events into the same projection and append to the same transcript.
+var ErrBusy = errors.New("agent: a turn or compaction is already running")
 
 // Toolset is the tool surface an Agent exposes to the model. *tool.Registry
 // satisfies it; tests can inject a scripted one.
@@ -43,6 +48,10 @@ type Agent struct {
 	historyLoaded bool
 
 	tsRecorder transcript.Recorder
+
+	// busy serializes Turn and Compact; the TUI also waits, but the guarantee
+	// belongs to the agent.
+	busy sync.Mutex
 
 	// Context compaction.
 	compact       CompactionOptions
@@ -112,6 +121,11 @@ func New(streamer llm.Streamer, opts ...Option) *Agent {
 // a tool: each response that asks for tools is executed and fed back, then the
 // model is asked again.
 func (a *Agent) Turn(ctx context.Context, input string) (Turn, error) {
+	if !a.busy.TryLock() {
+		return Turn{}, ErrBusy
+	}
+	defer a.busy.Unlock()
+
 	startTime := time.Now()
 
 	var (
@@ -419,9 +433,4 @@ func (a *Agent) emit(e schema.Event) {
 
 func (a *Agent) Events() <-chan schema.Event {
 	return a.events
-}
-
-// History returns the request history projected from the transcript.
-func (a *Agent) History() []llm.Message {
-	return a.history.Messages()
 }

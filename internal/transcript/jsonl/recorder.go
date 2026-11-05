@@ -31,11 +31,12 @@ type Recorder struct {
 	nextSeq     int64
 	closed      bool
 	subscribers []chan transcript.Event
+	problems    []transcript.Problem
 }
 
 // Open opens or creates path, validates all complete records, repairs a
-// partially written final line, and continues the sequence after the last valid
-// event.
+// partially written final line, answers tool calls whose result was never
+// written, and continues the sequence after the last valid event.
 func Open(path string) (*Recorder, error) {
 	if path == "" {
 		return nil, errors.New("transcript/jsonl: empty path")
@@ -48,18 +49,42 @@ func Open(path string) (*Recorder, error) {
 		return nil, fmt.Errorf("transcript/jsonl: open %s: %w", path, err)
 	}
 	r := &Recorder{path: path, file: file, nextSeq: 1}
-	if err := r.scan(); err != nil {
+	events, err := r.scan()
+	if err != nil {
+		_ = file.Close()
+		return nil, err
+	}
+	if err := r.repair(events); err != nil {
 		_ = file.Close()
 		return nil, err
 	}
 	return r, nil
 }
 
-// scan validates existing records and computes the next sequence number. A
-// final line without a newline is treated as a torn write and truncated.
-func (r *Recorder) scan() error {
+// Problems returns the semantic holes Repair found on open, including the ones
+// it fixed. The slice is read-only for callers.
+func (r *Recorder) Problems() []transcript.Problem { return r.problems }
+
+// repair appends the tool results a killed process never wrote. The request
+// side drops incomplete tool groups, so without this the results that did
+// arrive would be lost on every replay.
+func (r *Recorder) repair(events []transcript.Event) error {
+	healed, problems := transcript.Repair(events)
+	for _, ev := range healed {
+		if _, err := r.Append(ev); err != nil {
+			return fmt.Errorf("transcript/jsonl: repair %s: %w", r.path, err)
+		}
+	}
+	r.problems = problems
+	return nil
+}
+
+// scan validates existing records, returns them, and computes the next sequence
+// number. A final line without a newline is treated as a torn write and
+// truncated.
+func (r *Recorder) scan() ([]transcript.Event, error) {
 	if _, err := r.file.Seek(0, io.SeekStart); err != nil {
-		return fmt.Errorf("transcript/jsonl: seek %s: %w", r.path, err)
+		return nil, fmt.Errorf("transcript/jsonl: seek %s: %w", r.path, err)
 	}
 
 	reader := bufio.NewReaderSize(r.file, readBufferSize)
@@ -67,6 +92,7 @@ func (r *Recorder) scan() error {
 		offset int64
 		maxSeq int64
 		lineNo int
+		events []transcript.Event
 	)
 	for {
 		line, err := reader.ReadBytes('\n')
@@ -77,15 +103,16 @@ func (r *Recorder) scan() error {
 			if len(trimmed) > 0 {
 				ev, decErr := transcript.Decode(trimmed)
 				if decErr != nil {
-					return fmt.Errorf("%s:%d: %w", r.path, lineNo, decErr)
+					return nil, fmt.Errorf("%s:%d: %w", r.path, lineNo, decErr)
 				}
+				events = append(events, ev)
 				if ev.Seq() > maxSeq {
 					maxSeq = ev.Seq()
 				}
 			}
 		} else if len(line) > 0 && err == io.EOF {
 			if truncErr := r.file.Truncate(offset); truncErr != nil {
-				return fmt.Errorf("transcript/jsonl: truncate torn line in %s: %w", r.path, truncErr)
+				return nil, fmt.Errorf("transcript/jsonl: truncate torn line in %s: %w", r.path, truncErr)
 			}
 			break
 		}
@@ -93,7 +120,7 @@ func (r *Recorder) scan() error {
 			break
 		}
 		if err != nil {
-			return fmt.Errorf("transcript/jsonl: read %s: %w", r.path, err)
+			return nil, fmt.Errorf("transcript/jsonl: read %s: %w", r.path, err)
 		}
 	}
 
@@ -101,7 +128,7 @@ func (r *Recorder) scan() error {
 	if r.nextSeq < 1 {
 		r.nextSeq = 1
 	}
-	return nil
+	return events, nil
 }
 
 // Append assigns the next sequence number, writes one JSONL record, fsyncs it,

@@ -181,8 +181,13 @@ func (a *Agent) maybeCompact(ctx context.Context, hard bool) error {
 // Compact summarizes the oldest history now, regardless of the automatic
 // thresholds or whether automatic compaction is enabled. It reports false when
 // there is nothing to replace, and does not consume the automatic per-turn
-// budget. It must not run while a Turn is in flight.
+// budget. It fails with ErrBusy while a Turn is running.
 func (a *Agent) Compact(ctx context.Context) (bool, error) {
+	if !a.busy.TryLock() {
+		return false, ErrBusy
+	}
+	defer a.busy.Unlock()
+
 	if a.tsRecorder == nil {
 		return false, errors.New("compaction needs a transcript recorder")
 	}

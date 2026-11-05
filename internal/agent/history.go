@@ -102,16 +102,14 @@ func (h *historyProjection) Apply(ev transcript.Event) error {
 		delete(h.pending, e.CallID)
 
 	case transcript.StepEnd:
-		// Any call left pending here is incomplete; Messages drops it.
+		// Any call still pending here has no result; Messages answers it.
 		h.pending = make(map[string]string)
 
 	case transcript.TurnEnd, transcript.TurnFailed:
 		h.pending = make(map[string]string)
 
 	case transcript.CompactionSummary:
-		if err := h.applyCompaction(e); err != nil {
-			return err
-		}
+		h.applyCompaction(e)
 
 	default:
 		return fmt.Errorf("history: unsupported transcript event %q", ev.Type())
@@ -124,44 +122,19 @@ func (h *historyProjection) append(ev transcript.Event, msg llm.Message) {
 	h.entries = append(h.entries, historyEntry{seq: ev.Seq(), msg: msg})
 }
 
-// applyCompaction replaces the prefix addressed by the event with its summary.
-// A range that does not cover a prefix, or that splits a tool-call group, is
-// rejected; a range matching no entry is ignored.
-func (h *historyProjection) applyCompaction(e transcript.CompactionSummary) error {
-	if len(h.pending) > 0 {
-		return fmt.Errorf(
-			"history: compaction %d..%d while %d tool call(s) are pending",
-			e.ReplacedStartSeq, e.ReplacedEndSeq, len(h.pending),
-		)
-	}
+// applyCompaction replaces the entries addressed by the event with its summary.
+// planCompaction always starts a range at the first entry and cuts on a turn or
+// step boundary, so a range is a prefix that cannot split a tool-call group; a
+// range matching no entry is ignored.
+func (h *historyProjection) applyCompaction(e transcript.CompactionSummary) {
 	start, end := e.ReplacedStartSeq, e.ReplacedEndSeq
-	if start <= 0 || end < start {
-		return fmt.Errorf("history: invalid compaction range %d..%d", start, end)
-	}
 
 	kept := 0
-	for kept < len(h.entries) {
-		seq := h.entries[kept].seq
-		if seq < start || seq > end {
-			break
-		}
+	for kept < len(h.entries) && h.entries[kept].seq <= end {
 		kept++
 	}
 	if kept == 0 {
-		return nil
-	}
-	for _, en := range h.entries[kept:] {
-		if en.seq <= end {
-			return fmt.Errorf(
-				"history: compaction range %d..%d does not cover a prefix", start, end,
-			)
-		}
-	}
-	if kept < len(h.entries) && h.entries[kept].msg.Role == llm.RoleToolOutput {
-		// Cutting here would leave an orphan tool result.
-		return fmt.Errorf(
-			"history: compaction range %d..%d splits a tool call group", start, end,
-		)
+		return
 	}
 
 	next := make([]historyEntry, 0, len(h.entries)-kept+1)
@@ -172,7 +145,6 @@ func (h *historyProjection) applyCompaction(e transcript.CompactionSummary) erro
 	next = append(next, h.entries[kept:]...)
 	h.entries = next
 	h.trimUnits(end)
-	return nil
 }
 
 // trimUnits drops the boundaries that the replaced range covered.
@@ -197,9 +169,9 @@ func (h *historyProjection) snapshot() (entries []historyEntry, turns, steps []i
 	return h.entries, h.turns, h.steps
 }
 
-// Messages returns the request-safe view of the projection. It drops incomplete
-// tool-call groups and orphan tool results, so a failed turn can never leave the
-// next request with an unanswered function call.
+// Messages returns the request-safe view of the projection. It answers tool
+// calls whose result is missing and drops orphan tool results, so a request can
+// never carry an unanswered function call, whatever the transcript holds.
 func (h *historyProjection) Messages() []llm.Message {
 	return messagesOf(h.entries)
 }
@@ -236,9 +208,24 @@ func messagesOf(entries []historyEntry) []llm.Message {
 			j++
 		}
 
-		if len(have) == len(expected) {
-			out = append(out, msg)
-			out = append(out, group...)
+		// Keep the group even when a result is missing: dropping it would also
+		// discard the results that did arrive.
+		out = append(out, msg)
+		out = append(out, group...)
+		if len(have) < len(expected) {
+			for _, tc := range msg.ToolCalls {
+				if have[tc.ID] {
+					continue
+				}
+				out = append(
+					out, llm.Message{
+						Role:       llm.RoleToolOutput,
+						Name:       tc.Name,
+						ToolCallID: tc.ID,
+						Content:    transcript.MissingToolResult,
+					},
+				)
+			}
 		}
 		i = j
 	}
