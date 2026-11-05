@@ -60,7 +60,7 @@ func (m model) headerView() string {
 
 func (m model) statusView() string {
 	left := "Ready"
-	hint := "[enter] Send · [ctrl+j] Line Feed · [ctrl+t] Thinking · [ctrl+c] Quit"
+	hint := "enter Send · ctrl+j Newline · esc Abort · ctrl+t Think · ctrl+c Quit"
 
 	switch {
 	case m.perm != nil:
@@ -100,13 +100,17 @@ func (m model) usageView() string {
 
 func pair(left, right string, width int) string {
 	left = truncate(left, width, "…")
-	right = truncate(right, width, "…")
+	lw := displayWidth(left)
 
-	lw, rw := displayWidth(left), displayWidth(right)
-	if lw+rw+1 > width {
+	// Truncate the right side instead of dropping it, so the key hints stay
+	// visible on a narrow terminal.
+	if space := width - lw - 1; right != "" && space > 0 {
+		right = truncate(right, space, "…")
+	} else {
 		right = ""
-		rw = 0
 	}
+	rw := displayWidth(right)
+
 	gap := width - lw - rw
 	if gap < 0 {
 		gap = 0

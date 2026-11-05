@@ -31,6 +31,7 @@ func main() {
 	configPath := flag.String("config", "", "path to config.json (default: defaults + .env)")
 	catalogPath := flag.String("catalog", "catalog.json", "path to model catalog.json")
 	promptPath := flag.String("prompt", "", "path to a system prompt file (default: none)")
+	resume := flag.Bool("r", false, "choose a previous session started in the current directory")
 	flag.Parse()
 
 	cfg, err := config.Load(*configPath)
@@ -67,13 +68,31 @@ func main() {
 		log.Fatalf("create tools: %v", err)
 	}
 
-	sess, err := session.New(cfg.Agent.AgentDir, session.Options{
-		Cwd:      cfg.Cwd,
-		Provider: cfg.Provider.Name,
-		Model:    cfg.Provider.Model,
-	})
-	if err != nil {
-		log.Fatalf("create session: %v", err)
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
+
+	// -r chooses a stored session; without a choice a fresh one is created.
+	var sess *session.Session
+	if *resume {
+		sess, err = tui.ChooseSession(ctx, cfg.Agent.AgentDir, cfg.Cwd)
+		if errors.Is(err, tui.ErrSelectionAborted) {
+			return
+		}
+		if err != nil {
+			log.Fatalf("choose session: %v", err)
+		}
+	}
+	if sess != nil {
+		log.Printf("resumed session %s", sess.ID)
+	} else {
+		sess, err = session.New(cfg.Agent.AgentDir, session.Options{
+			Cwd:      cfg.Cwd,
+			Provider: cfg.Provider.Name,
+			Model:    cfg.Provider.Model,
+		})
+		if err != nil {
+			log.Fatalf("create session: %v", err)
+		}
 	}
 	defer func() {
 		if err := sess.Close(); err != nil {
@@ -91,6 +110,14 @@ func main() {
 		}
 	}()
 
+	// Replay the stored transcript into the scrollback; a fresh session has
+	// none. The agent replays the same events into its request history on the
+	// first turn.
+	replay, err := rec.ReadAll()
+	if err != nil {
+		log.Fatalf("read transcript: %v", err)
+	}
+
 	if cfg.Agent.Compaction.Enabled && m.ContextWindow <= 0 {
 		log.Printf(
 			"context compaction will not run: the context window is unknown; " +
@@ -103,9 +130,6 @@ func main() {
 		log.Fatalf("create agent: %v", err)
 	}
 
-	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
-	defer stop()
-
 	// The TUI is the single consumer of a.Events(); do not add another drainer
 	// here, or the two readers will steal each other's events.
 	label := m.Provider + "/" + m.Name
@@ -114,6 +138,7 @@ func main() {
 		tui.WithWorkDir(cfg.Cwd),
 		tui.WithPolicy(policy),
 		tui.WithContextWindow(m.ContextWindow),
+		tui.WithReplay(replay),
 	)
 	if err := t.Run(ctx); err != nil && !errors.Is(err, tea.ErrProgramKilled) {
 		log.Fatalf("tui: %v", err)

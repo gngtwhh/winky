@@ -95,6 +95,7 @@ Command-line flags:
 | `-config` | empty | Path to the config file. Without it, defaults are used and `provider.model` still needs to be set |
 | `-catalog` | `catalog.json` | Path to the model catalog |
 | `-prompt` | empty | Optional system prompt file |
+| `-r` | false | Choose a previous session started in the current directory and continue it |
 
 When running from another directory, pass `-catalog` with the correct path.
 
@@ -141,7 +142,8 @@ Key bindings:
 
 ## Session data
 
-Each launch creates a new session:
+Each launch creates a new session, and a launch that never records a user
+message is discarded on exit, so an unused session leaves no empty history.
 
 ```text
 ~/.winky/sessions/<timestamp>-<random>/
@@ -152,7 +154,23 @@ Each launch creates a new session:
 - `meta.json` stores the session id, creation time, working directory, and model information.
 - `transcript.jsonl` is an append-only event stream containing user messages, assistant output, reasoning, tool results, and turn/step boundaries.
 
-Each run starts a new session. `--resume` is not implemented yet.
+Sessions are scoped to the working directory stored in `meta.json`. `winky -r`
+only lists sessions started in the current directory, and the selection is the
+only argument it needs:
+
+```bash
+winky -r
+```
+
+The chosen session continues where it stopped: `transcript.jsonl` is replayed
+into the request history and into the TUI scrollback, and new events keep
+appending with continuing sequence numbers. `meta.json` keeps the cwd, provider,
+and model recorded when the session was created; only `updated_at` is refreshed
+on exit.
+
+In the chooser, `↑`/`↓` move, `Enter` resumes the highlighted session, `Ctrl+D`
+then `Enter` deletes the highlighted session with its transcript, `Esc` starts a
+new session instead, and `Ctrl+C` quits without starting anything.
 
 ## Context compaction
 

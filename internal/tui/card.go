@@ -188,7 +188,7 @@ func (m *model) rebuild() {
 	m.vp.SetContent(strings.Join(lines, "\n"))
 	m.dirty = false
 
-	if m.streaming && m.follow {
+	if m.follow {
 		m.vp.GotoBottom()
 	}
 }

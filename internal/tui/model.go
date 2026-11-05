@@ -122,7 +122,7 @@ type model struct {
 
 func newModel(ag Agent, st Styles, label string, expandReasoning bool) model {
 	ta := textarea.New()
-	ta.Placeholder = "What shall we do today?  ([enter] Send · [ctrl+j] Line Feed · [esc] Abort)"
+	ta.Placeholder = "What shall we do today?"
 	ta.Prompt = "> "
 	ta.ShowLineNumbers = false
 	ta.CharLimit = 0

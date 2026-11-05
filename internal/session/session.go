@@ -1,28 +1,44 @@
-// Package session owns the on-disk identity and directory of one conversation.
-//
-// v1 only creates new sessions. Loading an existing session is deliberately
-// deferred until the transcript can replace the in-memory history.
+// Package session owns the on-disk identity and directory of one conversation:
+// creating a new session, and listing or reopening the sessions that were
+// started in a given working directory.
 package session
 
 import (
+	"bufio"
+	"bytes"
 	"crypto/rand"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io/fs"
 	"os"
 	"path/filepath"
+	"runtime"
+	"sort"
+	"strings"
 	"sync"
 	"time"
+
+	"winky/internal/transcript"
 )
 
-const metaVersion = 1
+const (
+	metaVersion = 1
+	titleRunes  = 72
+)
 
 // Options describes the conversation a new session belongs to.
 type Options struct {
 	Cwd      string
 	Provider string
 	Model    string
+}
+
+// Summary describes one stored session in a listing.
+type Summary struct {
+	Meta
+	Title string
 }
 
 // Meta is the session sidecar written to meta.json.
@@ -93,13 +109,168 @@ func New(agentDir string, opts Options) (*Session, error) {
 	return s, nil
 }
 
+// Open reopens the session with the given id under agentDir/sessions. The
+// returned session continues where the transcript ended, because the recorder
+// resumes the sequence numbers it finds on disk.
+func Open(agentDir, id string) (*Session, error) {
+	dir, err := sessionDir(agentDir, id)
+	if err != nil {
+		return nil, err
+	}
+
+	metaPath := filepath.Join(dir, "meta.json")
+	data, err := os.ReadFile(metaPath)
+	if err != nil {
+		return nil, fmt.Errorf("session: read %s: %w", metaPath, err)
+	}
+	var meta Meta
+	if err := json.Unmarshal(data, &meta); err != nil {
+		return nil, fmt.Errorf("session: decode %s: %w", metaPath, err)
+	}
+	if meta.Version != metaVersion {
+		return nil, fmt.Errorf("session: unsupported meta version %d in %s", meta.Version, metaPath)
+	}
+	meta.ID = id
+
+	return &Session{
+		ID:             id,
+		Dir:            dir,
+		metaPath:       metaPath,
+		transcriptPath: filepath.Join(dir, "transcript.jsonl"),
+		meta:           meta,
+	}, nil
+}
+
+// Delete removes a stored session directory and its transcript.
+func Delete(agentDir, id string) error {
+	dir, err := sessionDir(agentDir, id)
+	if err != nil {
+		return err
+	}
+	if err := os.RemoveAll(dir); err != nil {
+		return fmt.Errorf("session: delete %s: %w", dir, err)
+	}
+	return nil
+}
+
+// sessionDir resolves and validates the directory of one stored session.
+func sessionDir(agentDir, id string) (string, error) {
+	if agentDir == "" {
+		return "", errors.New("session: empty agent directory")
+	}
+	if id == "" || id == "." || id == ".." || id != filepath.Base(id) {
+		return "", fmt.Errorf("session: invalid id %q", id)
+	}
+	return filepath.Join(agentDir, "sessions", id), nil
+}
+
+// List returns the sessions created in cwd, most recently updated first. A
+// session whose meta.json is unreadable is skipped instead of failing the whole
+// listing.
+func List(agentDir, cwd string) ([]Summary, error) {
+	if agentDir == "" {
+		return nil, errors.New("session: empty agent directory")
+	}
+
+	sessionsDir := filepath.Join(agentDir, "sessions")
+	entries, err := os.ReadDir(sessionsDir)
+	if err != nil {
+		if errors.Is(err, fs.ErrNotExist) {
+			return nil, nil
+		}
+		return nil, fmt.Errorf("session: list %s: %w", sessionsDir, err)
+	}
+
+	out := make([]Summary, 0, len(entries))
+	for _, entry := range entries {
+		if !entry.IsDir() {
+			continue
+		}
+		s, err := Open(agentDir, entry.Name())
+		if err != nil || !samePath(s.meta.Cwd, cwd) {
+			continue
+		}
+		out = append(out, Summary{Meta: s.meta, Title: sessionTitle(s.transcriptPath)})
+	}
+
+	sort.SliceStable(out, func(i, j int) bool {
+		if out[i].UpdatedAt.Equal(out[j].UpdatedAt) {
+			return out[i].CreatedAt.After(out[j].CreatedAt)
+		}
+		return out[i].UpdatedAt.After(out[j].UpdatedAt)
+	})
+	return out, nil
+}
+
+// samePath reports whether two working directories denote the same location;
+// Windows paths are compared case-insensitively.
+func samePath(a, b string) bool {
+	if a == "" || b == "" {
+		return false
+	}
+	ca, cb := filepath.Clean(a), filepath.Clean(b)
+	if ca == cb {
+		return true
+	}
+	return runtime.GOOS == "windows" && strings.EqualFold(ca, cb)
+}
+
+// sessionTitle derives a one-line title from the first user message; a session
+// without one has no title.
+func sessionTitle(path string) string {
+	title, _, _ := scanUserMessage(path)
+	return title
+}
+
+// scanUserMessage stops at the first user message, which titles the session and
+// proves it holds a conversation worth keeping. Unreadable records count as a
+// conversation, so nothing deletes data it cannot inspect.
+func scanUserMessage(path string) (title string, talked bool, err error) {
+	file, err := os.Open(path)
+	if err != nil {
+		if errors.Is(err, fs.ErrNotExist) {
+			return "", false, nil
+		}
+		return "", false, err
+	}
+	defer file.Close()
+
+	scanner := bufio.NewScanner(file)
+	scanner.Buffer(make([]byte, 0, 64*1024), 1<<20)
+	for scanner.Scan() {
+		line := bytes.TrimSpace(scanner.Bytes())
+		if len(line) == 0 {
+			continue
+		}
+		ev, decodeErr := transcript.Decode(line)
+		if decodeErr != nil {
+			return "", true, nil
+		}
+		msg, ok := ev.(transcript.UserMessage)
+		if !ok {
+			continue
+		}
+		title := strings.Join(strings.Fields(msg.Content), " ")
+		if r := []rune(title); len(r) > titleRunes {
+			title = string(r[:titleRunes]) + "…"
+		}
+		return title, true, nil
+	}
+	if err := scanner.Err(); err != nil {
+		return "", false, err
+	}
+	return "", false, nil
+}
+
 // MetaPath returns the session metadata file path.
 func (s *Session) MetaPath() string { return s.metaPath }
 
 // TranscriptPath returns the JSONL transcript file path.
 func (s *Session) TranscriptPath() string { return s.transcriptPath }
 
-// Close updates meta.json's updated_at. It is safe to call more than once.
+// Close updates meta.json's updated_at. A session that never recorded a user
+// message is removed instead, so quitting right after launch leaves no empty
+// history behind. It is safe to call more than once.
 func (s *Session) Close() error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -107,6 +278,15 @@ func (s *Session) Close() error {
 		return nil
 	}
 	s.closed = true
+
+	// Only an inspected-and-empty transcript is removed; an unreadable one is
+	// kept, because deleting data is worse than leaving an empty session.
+	if _, talked, err := scanUserMessage(s.transcriptPath); err == nil && !talked {
+		if err := os.RemoveAll(s.Dir); err != nil {
+			return fmt.Errorf("session: remove empty session %s: %w", s.Dir, err)
+		}
+		return nil
+	}
 
 	s.meta.UpdatedAt = time.Now().UTC()
 	if err := writeMeta(s.metaPath, s.meta); err != nil {

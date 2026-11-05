@@ -5,6 +5,7 @@ import (
 	"io"
 	"os"
 	"winky/internal/schema"
+	"winky/internal/transcript"
 
 	tea "charm.land/bubbletea/v2"
 
@@ -35,6 +36,7 @@ type Tui struct {
 	expandReasoning bool
 	policy          *tool.Policy
 	contextWindow   int
+	replayEvents    []transcript.Event
 
 	evCh chan AgentEvent
 	m    model
@@ -64,6 +66,12 @@ func WithWorkDir(dir string) Option { return func(t *Tui) { t.workDir = dir } }
 // unknown, in which case the TUI hides the context-usage gauge.
 func WithContextWindow(tokens int) Option {
 	return func(t *Tui) { t.contextWindow = tokens }
+}
+
+// WithReplay seeds the scrollback with the transcript events of a resumed
+// session. The agent replays the same transcript into its own history.
+func WithReplay(events []transcript.Event) Option {
+	return func(t *Tui) { t.replayEvents = events }
 }
 
 // WithAltScreen toggles the alternate screen buffer (default true).
@@ -103,6 +111,9 @@ func New(ag Agent, opts ...Option) *Tui {
 	t.m.contextWindow = t.contextWindow
 	if home, err := os.UserHomeDir(); err == nil {
 		t.m.home = home
+	}
+	if len(t.replayEvents) > 0 {
+		t.m.replayCards(t.replayEvents)
 	}
 	return t
 }

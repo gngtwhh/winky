@@ -33,12 +33,14 @@
     "provider": "deepseek",
     "protocol": "openai-responses",
     "family": "deepseek-flash",
-    "baseUrl": "https://api.deepseek.com"
+    "baseUrl": "https://api.deepseek.com",
+    "contextWindow": 1000000
   },
   "deepseek-v4-pro": {
     "provider": "deepseek",
     "protocol": "openai-responses",
     "family": "deepseek-v4-pro",
-    "baseUrl": "https://api.deepseek.com"
+    "baseUrl": "https://api.deepseek.com",
+    "contextWindow": 1000000
   }
 }
