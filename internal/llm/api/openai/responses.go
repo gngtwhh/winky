@@ -2,7 +2,11 @@ package openai
 
 import (
 	"context"
+	"errors"
 	"fmt"
+	"io"
+	"net"
+	"net/http"
 	"time"
 	"winky/internal/llm"
 
@@ -86,6 +90,7 @@ func consumeResponsesStream(
 			ch <- llm.ResponseEnd{
 				Timestamp:  time.Now(),
 				StopReason: llm.StopReasonFailed,
+				Err:        retryableCode(string(e.Response.Error.Code), e.Response.Error.Message),
 				Response:   buildResponse(e.Response),
 			}
 			return
@@ -94,7 +99,7 @@ func consumeResponsesStream(
 			ch <- llm.ResponseEnd{
 				Timestamp:  time.Now(),
 				StopReason: llm.StopReasonError,
-				Err:        fmt.Errorf("errcode=%q,errmsg=%q", e.Code, e.Message),
+				Err:        retryableCode(e.Code, e.Message),
 			}
 			return
 
@@ -163,7 +168,7 @@ func consumeResponsesStream(
 		ch <- llm.ResponseEnd{
 			Timestamp:  time.Now(),
 			StopReason: llm.StopReasonError,
-			Err:        fmt.Errorf("OpenAIStreamError: %w", err),
+			Err:        fmt.Errorf("OpenAIStreamError: %w", retryable(err)),
 		}
 		return
 	}
@@ -375,4 +380,31 @@ func convertToolsToParams(specs []llm.ToolSpec) []responses.ToolUnionParam {
 		tools[i] = tool
 	}
 	return tools
+}
+
+// retryable classifies a transport or API error: rate limits, server errors and
+// network failures are worth another attempt, protocol errors are not.
+func retryable(err error) error {
+	var apiErr *openai.Error
+	if errors.As(err, &apiErr) {
+		if apiErr.StatusCode == http.StatusTooManyRequests || apiErr.StatusCode >= 500 {
+			return &llm.RetryableError{Err: err}
+		}
+		return err
+	}
+	var netErr net.Error
+	if errors.As(err, &netErr) || errors.Is(err, io.EOF) || errors.Is(err, io.ErrUnexpectedEOF) {
+		return &llm.RetryableError{Err: err}
+	}
+	return err
+}
+
+// retryableCode classifies a stream error event by its provider error code.
+func retryableCode(code, message string) error {
+	err := fmt.Errorf("errcode=%q,errmsg=%q", code, message)
+	switch code {
+	case "server_error", "rate_limit_exceeded", "vector_store_timeout", "":
+		return &llm.RetryableError{Err: err}
+	}
+	return err
 }

@@ -7,6 +7,7 @@ The project is early-stage and focuses on the agent loop, tool permissions, and 
 ## Features
 
 - Streaming model output, reasoning, and tool calls
+- Automatic retry with backoff when a model request fails transiently (rate limit, 5xx, network drop)
 - File read, write, edit, delete, and directory operations
 - Shell commands, web search, and web fetch
 - Permission levels with per-action approval

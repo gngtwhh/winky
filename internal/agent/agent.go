@@ -23,6 +23,13 @@ const maxSteps = 100
 // events into the same projection and append to the same transcript.
 var ErrBusy = errors.New("agent: a turn or compaction is already running")
 
+const (
+	// maxStreamRetries bounds how often one model request is retried.
+	maxStreamRetries = 3
+	// retryBaseDelay doubles after each failed attempt.
+	retryBaseDelay = 500 * time.Millisecond
+)
+
 // Toolset is the tool surface an Agent exposes to the model. *tool.Registry
 // satisfies it; tests can inject a scripted one.
 type Toolset interface {
@@ -179,8 +186,8 @@ func (a *Agent) Turn(ctx context.Context, input string) (Turn, error) {
 			req.Tools = a.tools.Specs()
 		}
 
-		resp, usage, err := a.stream(ctx, req)
-		turnUsage = turnUsage.Add(usage)
+		resp, usage, retried, err := a.stream(ctx, req)
+		turnUsage = turnUsage.Add(retried).Add(usage)
 		if usage.PromptTokens > 0 {
 			// The prompt-token count is the exact size of the request just
 			// sent, so it is the best available measure of context usage.
@@ -320,18 +327,48 @@ func (a *Agent) recordStep(step Turn) error {
 	})
 }
 
-// stream runs one model request, forwarding live fragments to the event channel
-// and returning the terminal response and its usage.
-func (a *Agent) stream(ctx context.Context, req llm.Request) (*llm.Response, llm.TokenUsage, error) {
+// stream runs one model request, retrying transient failures with backoff. An
+// attempt that already emitted output is never retried: the same step would be
+// asked twice and the user already saw the partial answer.
+//
+// The usage of the last attempt is returned separately from the usage spent on
+// the failed ones: only the former describes the size of the request, which is
+// what context accounting needs.
+func (a *Agent) stream(ctx context.Context, req llm.Request) (*llm.Response, llm.TokenUsage, llm.TokenUsage, error) {
+	var retried llm.TokenUsage
+	for attempt := 0; ; attempt++ {
+		resp, usage, produced, err := a.streamOnce(ctx, req)
+		if err == nil {
+			return resp, usage, retried, nil
+		}
+		if produced || attempt >= maxStreamRetries || !llm.Retryable(err) || ctx.Err() != nil {
+			return nil, usage, retried, err
+		}
+		retried = retried.Add(usage)
+
+		delay := retryBaseDelay << attempt
+		a.emit(schema.Retrying{Attempt: attempt + 1, Max: maxStreamRetries, Delay: delay, Err: err})
+		select {
+		case <-ctx.Done():
+			return nil, usage, retried, err
+		case <-time.After(delay):
+		}
+	}
+}
+
+// streamOnce runs a single attempt, forwarding live fragments to the event
+// channel. produced reports whether anything reached the view.
+func (a *Agent) streamOnce(ctx context.Context, req llm.Request) (*llm.Response, llm.TokenUsage, bool, error) {
 	ch, err := a.streamer.Stream(ctx, req)
 	if err != nil {
-		return nil, llm.TokenUsage{}, err
+		return nil, llm.TokenUsage{}, false, err
 	}
 
 	stopReason := llm.StopReasonUnknown
 	var streamErr error
 	var finalResp *llm.Response
 	var usage llm.TokenUsage
+	produced := false
 
 	// Consume the chunk groups obtained from the stream iteration
 	// and generate corresponding events
@@ -339,18 +376,25 @@ func (a *Agent) stream(ctx context.Context, req llm.Request) (*llm.Response, llm
 		switch c := chunk.(type) {
 		case llm.ReasoningDelta:
 			a.emit(schema.ReasoningDelta{ItemID: c.ItemID, Text: c.Text})
+			produced = true
 		case llm.ReasoningSummaryDelta:
 			a.emit(schema.ReasoningSummaryDelta{ItemID: c.ItemID, Text: c.Text})
+			produced = true
 		case llm.OutputDelta:
 			a.emit(schema.OutputDelta{ItemID: c.ItemID, Text: c.Text})
+			produced = true
 		case llm.RefusalDelta:
 			a.emit(schema.OutputDelta{ItemID: c.ItemID, Text: c.Text})
+			produced = true
 		case llm.ToolCallStart:
 			a.emit(schema.ToolCallStart{CallID: c.CallID, Name: c.Name})
+			produced = true
 		case llm.ToolCallArgsDelta:
 			a.emit(schema.ToolCallArgsDelta{CallID: c.CallID, Delta: c.Delta})
+			produced = true
 		case llm.ToolCallEnd:
 			a.emit(schema.ToolCallEnd{CallID: c.CallID, Arguments: c.Arguments})
+			produced = true
 		case llm.ResponseEnd:
 			stopReason = c.StopReason
 			streamErr = c.Err
@@ -365,9 +409,9 @@ func (a *Agent) stream(ctx context.Context, req llm.Request) (*llm.Response, llm
 		if streamErr == nil {
 			streamErr = fmt.Errorf("stream stopped: %s", stopReason)
 		}
-		return nil, usage, streamErr
+		return nil, usage, produced, streamErr
 	}
-	return finalResp, usage, nil
+	return finalResp, usage, produced, nil
 }
 
 // runTools executes the calls of one step. Calls run concurrently unless any

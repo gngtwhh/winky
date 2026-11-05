@@ -3,6 +3,7 @@ package tui
 import (
 	"context"
 	"errors"
+	"fmt"
 	"strings"
 	"time"
 	"winky/internal/schema"
@@ -273,6 +274,12 @@ func (m *model) handleEvent(e schema.Event) tea.Cmd {
 		// the event may be delivered after turnResult.
 		m.contextTokens = ev.Tokens
 
+	case schema.Retrying:
+		if m.cancelled[m.turn] {
+			return nil
+		}
+		m.retry = fmt.Sprintf("retrying %d/%d in %s", ev.Attempt, ev.Max, ev.Delay)
+
 	case schema.ContextCompacted:
 		// Not tied to a turn: a cancelled turn's id must not swallow the event,
 		// because the compaction really happened and is in the transcript.
@@ -325,12 +332,14 @@ func (m *model) handleEvent(e schema.Event) tea.Cmd {
 }
 
 func (m *model) appendDelta(key blockKey, text string) {
+	m.retry = ""
 	idx := m.ensureBlock(key)
 	m.history[idx].Text += text
 	m.dirty = true
 }
 
 func (m *model) ensureBlock(key blockKey) int {
+	m.retry = ""
 	if idx, ok := m.liveBlocks[key]; ok {
 		return idx
 	}

@@ -106,6 +106,7 @@ type model struct {
 
 	// Status line.
 	status  string
+	retry   string // non-empty while a model request is being retried
 	err     error
 	started time.Time
 
@@ -223,4 +224,5 @@ func (m *model) finishTurn() {
 	m.streaming = false
 	m.turnCanc = nil
 	m.dirty = false
+	m.retry = ""
 }

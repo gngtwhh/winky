@@ -68,6 +68,9 @@ func (m model) statusView() string {
 		hint = "y Allow · n Deny"
 	case m.streaming:
 		left = fmt.Sprintf("%s generating · %s", m.sp.View(), time.Since(m.started).Round(time.Second))
+		if m.retry != "" {
+			left = m.sp.View() + " " + m.retry
+		}
 		hint = "esc Abort · Press a Thinking title to unfold"
 	case m.err != nil:
 		left = "Error"

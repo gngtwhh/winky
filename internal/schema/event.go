@@ -66,6 +66,15 @@ type ContextCompacted struct {
 	Kind   string
 }
 
+// Retrying reports that one model request is being retried after a transient
+// failure. Attempt counts the retries, not the total attempts.
+type Retrying struct {
+	Attempt int
+	Max     int
+	Delay   time.Duration
+	Err     error
+}
+
 // TurnEnd marks a successfully completed turn and carries the assembled Turn,
 // plus this turn's usage and the session total. A zero Usage.TotalTokens means
 // the provider reported no usage.
@@ -84,6 +93,7 @@ type TurnFailed struct {
 }
 
 func (TurnStart) agentEventType() string        { return "turn_start" }
+func (Retrying) agentEventType() string         { return "retrying" }
 func (ContextUsage) agentEventType() string     { return "context_usage" }
 func (ContextCompacted) agentEventType() string { return "context_compacted" }
 func (ReasoningDelta) agentEventType() string   { return "reasoning_delta" }
