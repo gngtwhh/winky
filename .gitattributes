@@ -1,0 +1,28 @@
+# 仓库内统一使用 LF，检出到任何平台都不做换行符转换
+* text=auto eol=lf
+
+# 明确文本类型（防止被误判为二进制）
+*.go    text eol=lf
+*.md    text eol=lf
+*.json  text eol=lf
+*.mod   text eol=lf
+*.sum   text eol=lf
+*.yaml  text eol=lf
+*.yml   text eol=lf
+*.txt   text eol=lf
+*.sh    text eol=lf
+.gitignore      text eol=lf
+.gitattributes  text eol=lf
+
+# 二进制文件：禁止任何换行符处理
+*.png   binary
+*.jpg   binary
+*.jpeg  binary
+*.gif   binary
+*.ico   binary
+*.pdf   binary
+*.zip   binary
+*.gz    binary
+*.exe   binary
+*.dll   binary
+*.so    binary
