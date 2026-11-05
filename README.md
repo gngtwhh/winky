@@ -149,10 +149,12 @@ message is discarded on exit, so an unused session leaves no empty history.
 ~/.winky/sessions/<timestamp>-<random>/
   meta.json
   transcript.jsonl
+  session.lock
 ```
 
 - `meta.json` stores the session id, creation time, working directory, and model information.
 - `transcript.jsonl` is an append-only event stream containing user messages, assistant output, reasoning, tool results, and turn/step boundaries.
+- `session.lock` is the per-session file lock. It keeps one session open in one process at a time: a second process fails with "session is in use by another process", and `-r` shows such a session as `in use`. The lock is an OS file lock, so it disappears with the process even after a crash; the file itself stays on disk until the session is deleted.
 
 Sessions are scoped to the working directory stored in `meta.json`. `winky -r`
 only lists sessions started in the current directory, and the selection is the

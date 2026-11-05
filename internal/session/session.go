@@ -20,13 +20,23 @@ import (
 	"sync"
 	"time"
 
+	"github.com/gofrs/flock"
+
 	"winky/internal/transcript"
 )
 
 const (
 	metaVersion = 1
 	titleRunes  = 72
+
+	// lockName is the per-session lock file. It stays on disk for the lifetime
+	// of the session directory: unlinking it would let two processes lock
+	// different inodes and defeat the mutual exclusion.
+	lockName = "session.lock"
 )
+
+// ErrInUse reports a session that is currently open in another process.
+var ErrInUse = errors.New("session is in use by another process")
 
 // Options describes the conversation a new session belongs to.
 type Options struct {
@@ -39,6 +49,7 @@ type Options struct {
 type Summary struct {
 	Meta
 	Title string
+	InUse bool
 }
 
 // Meta is the session sidecar written to meta.json.
@@ -62,6 +73,7 @@ type Session struct {
 	meta           Meta
 
 	mu     sync.Mutex
+	lock   *flock.Flock
 	closed bool
 }
 
@@ -106,51 +118,137 @@ func New(agentDir string, opts Options) (*Session, error) {
 		_ = os.RemoveAll(dir)
 		return nil, err
 	}
+	if err := s.lockSession(); err != nil {
+		_ = os.RemoveAll(dir)
+		return nil, err
+	}
 	return s, nil
 }
 
 // Open reopens the session with the given id under agentDir/sessions. The
 // returned session continues where the transcript ended, because the recorder
-// resumes the sequence numbers it finds on disk.
+// resumes the sequence numbers it finds on disk. A session already open in
+// another process fails with ErrInUse.
 func Open(agentDir, id string) (*Session, error) {
 	dir, err := sessionDir(agentDir, id)
 	if err != nil {
 		return nil, err
 	}
 
-	metaPath := filepath.Join(dir, "meta.json")
-	data, err := os.ReadFile(metaPath)
-	if err != nil {
-		return nil, fmt.Errorf("session: read %s: %w", metaPath, err)
-	}
-	var meta Meta
-	if err := json.Unmarshal(data, &meta); err != nil {
-		return nil, fmt.Errorf("session: decode %s: %w", metaPath, err)
-	}
-	if meta.Version != metaVersion {
-		return nil, fmt.Errorf("session: unsupported meta version %d in %s", meta.Version, metaPath)
-	}
-	meta.ID = id
-
-	return &Session{
+	s := &Session{
 		ID:             id,
 		Dir:            dir,
-		metaPath:       metaPath,
+		metaPath:       filepath.Join(dir, "meta.json"),
 		transcriptPath: filepath.Join(dir, "transcript.jsonl"),
-		meta:           meta,
-	}, nil
+	}
+	if err := s.lockSession(); err != nil {
+		return nil, err
+	}
+
+	meta, err := readMeta(s.metaPath)
+	if err != nil {
+		_ = s.releaseLock()
+		return nil, err
+	}
+	meta.ID = id
+	s.meta = meta
+	return s, nil
 }
 
-// Delete removes a stored session directory and its transcript.
+// lockSession takes the exclusive lock of one session directory.
+func (s *Session) lockSession() error {
+	l := flock.New(filepath.Join(s.Dir, lockName))
+	ok, err := l.TryLock()
+	if err != nil {
+		_ = l.Close()
+		if errors.Is(err, errors.ErrUnsupported) {
+			return fmt.Errorf("session %s: file locking is not supported on this filesystem: %w", s.ID, err)
+		}
+		return fmt.Errorf("session %s: lock: %w", s.ID, err)
+	}
+	if !ok {
+		_ = l.Close()
+		return fmt.Errorf("session %s: %w", s.ID, ErrInUse)
+	}
+	s.lock = l
+	return nil
+}
+
+// releaseLock drops the lock but keeps the lock file, so another process cannot
+// lock a fresh inode while a third one still holds the old one.
+func (s *Session) releaseLock() error {
+	if s.lock == nil {
+		return nil
+	}
+	l := s.lock
+	s.lock = nil
+	return errors.Join(l.Unlock(), l.Close())
+}
+
+// inUse probes the session lock without keeping it.
+func inUse(dir string) bool {
+	l := flock.New(filepath.Join(dir, lockName))
+	ok, err := l.TryLock()
+	if err != nil {
+		_ = l.Close()
+		return false
+	}
+	if !ok {
+		_ = l.Close()
+		return true
+	}
+	_ = errors.Join(l.Unlock(), l.Close())
+	return false
+}
+
+// Delete removes a stored session directory and its transcript. A session open
+// in another process is refused with ErrInUse.
 func Delete(agentDir, id string) error {
 	dir, err := sessionDir(agentDir, id)
 	if err != nil {
 		return err
 	}
-	if err := os.RemoveAll(dir); err != nil {
-		return fmt.Errorf("session: delete %s: %w", dir, err)
+
+	s := &Session{
+		ID:             id,
+		Dir:            dir,
+		metaPath:       filepath.Join(dir, "meta.json"),
+		transcriptPath: filepath.Join(dir, "transcript.jsonl"),
+	}
+	if err := s.lockSession(); err != nil {
+		return err
+	}
+
+	// Files go first: the lock file cannot be removed while it is held, and a
+	// racing opener fails on the missing metadata instead of a half session.
+	rmErr := errors.Join(removeFile(s.transcriptPath), removeFile(s.metaPath))
+	unlockErr := s.releaseLock()
+	dirErr := os.RemoveAll(dir)
+	return errors.Join(rmErr, unlockErr, dirErr)
+}
+
+// removeFile deletes path, tolerating a missing file.
+func removeFile(path string) error {
+	if err := os.Remove(path); err != nil && !errors.Is(err, fs.ErrNotExist) {
+		return err
 	}
 	return nil
+}
+
+// readMeta loads and validates a session's meta.json.
+func readMeta(metaPath string) (Meta, error) {
+	data, err := os.ReadFile(metaPath)
+	if err != nil {
+		return Meta{}, fmt.Errorf("session: read %s: %w", metaPath, err)
+	}
+	var meta Meta
+	if err := json.Unmarshal(data, &meta); err != nil {
+		return Meta{}, fmt.Errorf("session: decode %s: %w", metaPath, err)
+	}
+	if meta.Version != metaVersion {
+		return Meta{}, fmt.Errorf("session: unsupported meta version %d in %s", meta.Version, metaPath)
+	}
+	return meta, nil
 }
 
 // sessionDir resolves and validates the directory of one stored session.
@@ -186,11 +284,17 @@ func List(agentDir, cwd string) ([]Summary, error) {
 		if !entry.IsDir() {
 			continue
 		}
-		s, err := Open(agentDir, entry.Name())
-		if err != nil || !samePath(s.meta.Cwd, cwd) {
+		dir := filepath.Join(sessionsDir, entry.Name())
+		meta, err := readMeta(filepath.Join(dir, "meta.json"))
+		if err != nil || !samePath(meta.Cwd, cwd) {
 			continue
 		}
-		out = append(out, Summary{Meta: s.meta, Title: sessionTitle(s.transcriptPath)})
+		meta.ID = entry.Name()
+		out = append(out, Summary{
+			Meta:  meta,
+			Title: sessionTitle(filepath.Join(dir, "transcript.jsonl")),
+			InUse: inUse(dir),
+		})
 	}
 
 	sort.SliceStable(out, func(i, j int) bool {
@@ -268,9 +372,10 @@ func (s *Session) MetaPath() string { return s.metaPath }
 // TranscriptPath returns the JSONL transcript file path.
 func (s *Session) TranscriptPath() string { return s.transcriptPath }
 
-// Close updates meta.json's updated_at. A session that never recorded a user
-// message is removed instead, so quitting right after launch leaves no empty
-// history behind. It is safe to call more than once.
+// Close releases the session lock and updates meta.json's updated_at. A session
+// that never recorded a user message is removed instead, so quitting right
+// after launch leaves no empty history behind. It is safe to call more than
+// once.
 func (s *Session) Close() error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -282,17 +387,13 @@ func (s *Session) Close() error {
 	// Only an inspected-and-empty transcript is removed; an unreadable one is
 	// kept, because deleting data is worse than leaving an empty session.
 	if _, talked, err := scanUserMessage(s.transcriptPath); err == nil && !talked {
-		if err := os.RemoveAll(s.Dir); err != nil {
-			return fmt.Errorf("session: remove empty session %s: %w", s.Dir, err)
-		}
-		return nil
+		unlockErr := s.releaseLock()
+		return errors.Join(unlockErr, os.RemoveAll(s.Dir))
 	}
 
 	s.meta.UpdatedAt = time.Now().UTC()
-	if err := writeMeta(s.metaPath, s.meta); err != nil {
-		return err
-	}
-	return nil
+	metaErr := writeMeta(s.metaPath, s.meta)
+	return errors.Join(metaErr, s.releaseLock())
 }
 
 func newID() (string, error) {

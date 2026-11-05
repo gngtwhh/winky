@@ -124,6 +124,17 @@ func (p picker) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return p, nil
 		}
 
+		// A session held by another process cannot be resumed or deleted; say so
+		// instead of failing later.
+		p.status = ""
+		if p.sessions[p.cursor].InUse {
+			switch msg.String() {
+			case "enter", "ctrl+d":
+				p.status = "session is in use by another process"
+				return p, nil
+			}
+		}
+
 		switch msg.String() {
 		case "up", "k":
 			if p.cursor > 0 {
@@ -141,7 +152,6 @@ func (p picker) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		case "ctrl+d":
 			if len(p.sessions) > 0 {
 				p.confirming = true
-				p.status = ""
 			}
 		case "ctrl+c":
 			p.aborted = true
@@ -149,7 +159,6 @@ func (p picker) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		case "esc", "q":
 			return p, tea.Quit
 		}
-		p.status = ""
 	}
 	return p, nil
 }
@@ -234,11 +243,19 @@ func (p picker) row(i, width int) string {
 	if i == p.cursor {
 		marker = "› "
 	}
-	line := truncate(fmt.Sprintf("%s%-12s %-20s %s", marker, formatAge(s.UpdatedAt), model, title), width, "…")
-	if i == p.cursor {
-		return p.style.User.Render(line)
+	line := fmt.Sprintf("%s%-12s %-20s %s", marker, formatAge(s.UpdatedAt), model, title)
+	if s.InUse {
+		line += " · in use"
 	}
-	return p.style.Assistant.Render(line)
+	line = truncate(line, width, "…")
+	switch {
+	case i == p.cursor:
+		return p.style.User.Render(line)
+	case s.InUse:
+		return p.style.Hint.Render(line)
+	default:
+		return p.style.Assistant.Render(line)
+	}
 }
 
 // rows is the number of session lines that fit under the header and above the
