@@ -175,7 +175,7 @@ func (a *Agent) maybeCompact(ctx context.Context, hard bool) error {
 	if hard {
 		kind = "auto_step"
 	}
-	return a.recordCompaction(plan, before, summary, kind)
+	return a.recordCompaction(plan, before, summary, kind, usage)
 }
 
 // Compact summarizes the oldest history now, regardless of the automatic
@@ -210,7 +210,7 @@ func (a *Agent) Compact(ctx context.Context) (bool, error) {
 	}
 	a.totalUsage = a.totalUsage.Add(usage)
 
-	if err := a.recordCompaction(plan, before, summary, "manual"); err != nil {
+	if err := a.recordCompaction(plan, before, summary, "manual", usage); err != nil {
 		return false, err
 	}
 	return true, nil
@@ -228,7 +228,7 @@ func (a *Agent) manualKeepBudget() int {
 }
 
 // recordCompaction persists one compaction event and reports the new size.
-func (a *Agent) recordCompaction(plan compactionPlan, before int, summary, kind string) error {
+func (a *Agent) recordCompaction(plan compactionPlan, before int, summary, kind string, usage llm.TokenUsage) error {
 	after := before - estimateMessages(plan.replaced) + estimateText(summary)
 	if after < 0 {
 		after = 0
@@ -242,6 +242,7 @@ func (a *Agent) recordCompaction(plan compactionPlan, before int, summary, kind 
 		Model:            a.summaryModel(),
 		TokensBefore:     before,
 		TokensAfter:      after,
+		Usage:            usagePtr(usage),
 	})
 	if err != nil {
 		return err

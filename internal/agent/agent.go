@@ -196,13 +196,13 @@ func (a *Agent) Turn(ctx context.Context, input string) (Turn, error) {
 			a.emit(schema.ContextUsage{Tokens: usage.PromptTokens})
 		}
 		if err != nil {
-			_ = a.record(transcript.StepEnd{Timestamp: time.Now()})
+			_ = a.record(transcript.StepEnd{Timestamp: time.Now(), Usage: usagePtr(usage)})
 			return Turn{}, a.fail(err, turnUsage)
 		}
 
 		stepTurn := turnFromResponse(resp)
 		if err := a.recordStep(stepTurn); err != nil {
-			_ = a.record(transcript.StepEnd{Timestamp: time.Now()})
+			_ = a.record(transcript.StepEnd{Timestamp: time.Now(), Usage: usagePtr(usage)})
 			return Turn{}, a.fail(err, turnUsage)
 		}
 
@@ -210,7 +210,7 @@ func (a *Agent) Turn(ctx context.Context, input string) (Turn, error) {
 
 		calls := stepTurn.ToolCalls()
 		if len(calls) == 0 {
-			if err := a.record(transcript.StepEnd{Timestamp: time.Now()}); err != nil {
+			if err := a.record(transcript.StepEnd{Timestamp: time.Now(), Usage: usagePtr(usage)}); err != nil {
 				return Turn{}, a.fail(err, turnUsage)
 			}
 			break
@@ -225,7 +225,7 @@ func (a *Agent) Turn(ctx context.Context, input string) (Turn, error) {
 		turn.ToolResults = append(turn.ToolResults, results...)
 		for _, r := range results {
 			if err := a.record(transcript.ToolResult{CallID: r.CallID, Output: r.Output}); err != nil {
-				_ = a.record(transcript.StepEnd{Timestamp: time.Now()})
+				_ = a.record(transcript.StepEnd{Timestamp: time.Now(), Usage: usagePtr(usage)})
 				return Turn{}, a.fail(err, turnUsage)
 			}
 			a.emit(
@@ -236,7 +236,7 @@ func (a *Agent) Turn(ctx context.Context, input string) (Turn, error) {
 			)
 		}
 
-		if err := a.record(transcript.StepEnd{Timestamp: time.Now()}); err != nil {
+		if err := a.record(transcript.StepEnd{Timestamp: time.Now(), Usage: usagePtr(usage)}); err != nil {
 			return Turn{}, a.fail(err, turnUsage)
 		}
 	}
@@ -291,7 +291,39 @@ func (a *Agent) loadHistory() error {
 	}
 	a.history = h
 	a.historyLoaded = true
+	a.restoreUsage(events)
 	return nil
+}
+
+// restoreUsage reads back what the session already spent, so a resumed session
+// does not report zero. Only request usage is persisted; tokens burned by a
+// discarded retry attempt are not.
+func (a *Agent) restoreUsage(events []transcript.Event) {
+	var (
+		total      llm.TokenUsage
+		lastPrompt int
+	)
+	for _, ev := range events {
+		switch e := ev.(type) {
+		case transcript.StepEnd:
+			if e.Usage != nil {
+				total = total.Add(llmUsage(*e.Usage))
+				if e.Usage.PromptTokens > 0 {
+					lastPrompt = e.Usage.PromptTokens
+				}
+			}
+		case transcript.CompactionSummary:
+			if e.Usage != nil {
+				total = total.Add(llmUsage(*e.Usage))
+			}
+		}
+	}
+
+	a.totalUsage = total
+	if lastPrompt > 0 {
+		a.lastPromptTokens = lastPrompt
+		a.lastPromptEstimate = a.estimateRequest(a.history.Messages())
+	}
 }
 
 // recordStep writes the reasoning, reasoning summary, and assistant output
@@ -321,10 +353,12 @@ func (a *Agent) recordStep(step Turn) error {
 	if content == "" && len(toolCalls) == 0 {
 		return nil
 	}
-	return a.record(transcript.AssistantOutputMessage{
-		Content:   content,
-		ToolCalls: toolCalls,
-	})
+	return a.record(
+		transcript.AssistantOutputMessage{
+			Content:   content,
+			ToolCalls: toolCalls,
+		},
+	)
 }
 
 // stream runs one model request, retrying transient failures with backoff. An
@@ -457,6 +491,30 @@ func (a *Agent) runOne(ctx context.Context, c tool.Call) ToolResult {
 	return ToolResult{
 		CallID: c.ID, Name: c.Name, Output: res.Output,
 		IsError: res.IsError, Duration: time.Since(start),
+	}
+}
+
+// usagePtr converts provider usage into the stored form, or nil when the
+// provider reported none, so a zero value never reaches the transcript.
+func usagePtr(u llm.TokenUsage) *transcript.Usage {
+	if u.TotalTokens == 0 && u.PromptTokens == 0 && u.CompletionTokens == 0 {
+		return nil
+	}
+	return &transcript.Usage{
+		PromptTokens:     u.PromptTokens,
+		CompletionTokens: u.CompletionTokens,
+		TotalTokens:      u.TotalTokens,
+		CachedTokens:     u.CachedTokens,
+	}
+}
+
+// llmUsage converts stored usage back into the provider-facing type.
+func llmUsage(u transcript.Usage) llm.TokenUsage {
+	return llm.TokenUsage{
+		PromptTokens:     u.PromptTokens,
+		CompletionTokens: u.CompletionTokens,
+		TotalTokens:      u.TotalTokens,
+		CachedTokens:     u.CachedTokens,
 	}
 }
 

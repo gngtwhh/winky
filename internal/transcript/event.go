@@ -2,6 +2,16 @@ package transcript
 
 import "time"
 
+// Usage is the token accounting of one request, persisted with the event that
+// closes it. It mirrors llm.TokenUsage on purpose: the stored format must not
+// depend on the provider-facing package.
+type Usage struct {
+	PromptTokens     int `json:"prompt_tokens,omitempty"`
+	CompletionTokens int `json:"completion_tokens,omitempty"`
+	TotalTokens      int `json:"total_tokens,omitempty"`
+	CachedTokens     int `json:"cached_tokens,omitempty"`
+}
+
 // Event is an event generated during an agent's conversation.
 // It can be the start of the conversation, the end of the conversation,
 // text output, tool invocation, result return, and so on.
@@ -74,6 +84,8 @@ type CompactionSummary struct {
 	Model            string    `json:"model,omitempty"`
 	TokensBefore     int       `json:"tokens_before,omitempty"`
 	TokensAfter      int       `json:"tokens_after,omitempty"`
+	// Usage is what the summarizing request cost; older transcripts omit it.
+	Usage *Usage `json:"usage,omitempty"`
 }
 
 func (e CompactionSummary) Type() string { return "compaction_summary" }
@@ -109,9 +121,13 @@ type StepStart struct {
 
 func (e StepStart) Type() string { return "step_start" }
 
+// StepEnd closes one model request. Usage is what the provider reported for it,
+// and its PromptTokens is the context size at that point, so a resumed session
+// can restore both. Older transcripts omit it.
 type StepEnd struct {
 	baseEvent
 	Timestamp time.Time `json:"timestamp"`
+	Usage     *Usage    `json:"usage,omitempty"`
 }
 
 func (e StepEnd) Type() string { return "step_end" }
