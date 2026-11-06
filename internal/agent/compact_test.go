@@ -64,14 +64,14 @@ func TestCompactionReplayMatchesLive(t *testing.T) {
 
 	// Pretend the provider measured the last request: the estimate is anchored
 	// on that number, so this is what pushes the context over the limit.
-	ag.lastPromptEstimate = ag.estimateRequest(ag.history.Messages())
+	ag.lastPromptEstimate = ag.estimateRequest(mustView(t, ag).Messages())
 	ag.lastPromptTokens = 2600
 
 	if err := ag.maybeCompact(context.Background(), false); err != nil {
 		t.Fatalf("maybeCompact: %v", err)
 	}
 
-	live := ag.history.Messages()
+	live := mustView(t, ag).Messages()
 	if len(live) != 3 {
 		t.Fatalf("messages = %d, want summary + last turn: %+v", len(live), live)
 	}
@@ -88,13 +88,7 @@ func TestCompactionReplayMatchesLive(t *testing.T) {
 		t.Fatalf("compaction event = %+v", cs)
 	}
 
-	replayed := newHistoryProjection()
-	for _, ev := range rec.events {
-		if err := replayed.Apply(ev); err != nil {
-			t.Fatalf("replay %s: %v", ev.Type(), err)
-		}
-	}
-	if got := replayed.Messages(); !reflect.DeepEqual(got, live) {
+	if got := projectEvents(t, rec.events).Messages(); !reflect.DeepEqual(got, live) {
 		t.Fatalf("replayed messages = %+v, want %+v", got, live)
 	}
 }
@@ -103,27 +97,20 @@ func TestCompactionReplayMatchesLive(t *testing.T) {
 // group. It is applied as written; the request stays valid because the leftover
 // result becomes an orphan Messages drops.
 func TestCompactionSplitsToolGroupKeepsRequestValid(t *testing.T) {
-	h := newHistoryProjection()
 	events := []transcript.Event{
-		transcript.UserMessage{Content: "read it"},
-		transcript.AssistantOutputMessage{
+		transcript.WithSeq(transcript.UserMessage{Content: "read it"}, 1),
+		transcript.WithSeq(transcript.AssistantOutputMessage{
 			ToolCalls: []transcript.ToolCall{{CallID: "c1", Name: "read_file"}},
-		},
-		transcript.ToolResult{CallID: "c1", Output: "contents"},
-	}
-	for i, ev := range events {
-		if err := h.Apply(transcript.WithSeq(ev, int64(i+1))); err != nil {
-			t.Fatalf("apply %s: %v", ev.Type(), err)
-		}
+		}, 2),
+		transcript.WithSeq(transcript.ToolResult{CallID: "c1", Output: "contents"}, 3),
+		transcript.WithSeq(transcript.CompactionSummary{
+			Summary:          "s",
+			ReplacedStartSeq: 1,
+			ReplacedEndSeq:   2,
+		}, 4),
 	}
 
-	if err := h.Apply(transcript.WithSeq(transcript.CompactionSummary{
-		Summary:          "s",
-		ReplacedStartSeq: 1,
-		ReplacedEndSeq:   2,
-	}, 4)); err != nil {
-		t.Fatalf("apply compaction: %v", err)
-	}
+	h := projectEvents(t, events)
 
 	msgs := h.Messages()
 	if len(msgs) != 1 || msgs[0].Role != llm.RoleSystem || msgs[0].Content != "s" {
@@ -136,11 +123,21 @@ func TestEstimateContextGrowsWithHistory(t *testing.T) {
 	rec := &memRecorder{}
 	ag := New(&scriptedStreamer{}, WithTranscriptRecorder(rec), WithMaxOutputTokens(100))
 
-	empty := ag.estimateContext()
+	empty := mustEstimate(t, ag)
 	recordTurn(t, ag, 4000)
-	if got := ag.estimateContext(); got <= empty {
+	if got := mustEstimate(t, ag); got <= empty {
 		t.Fatalf("estimate did not grow: %d then %d", empty, got)
 	}
+}
+
+// mustEstimate reports the current context estimate for assertions.
+func mustEstimate(t *testing.T, a *Agent) int {
+	t.Helper()
+	n, err := a.estimateContext()
+	if err != nil {
+		t.Fatalf("estimateContext: %v", err)
+	}
+	return n
 }
 
 // Manual compaction runs below the automatic thresholds, and reports a no-op
@@ -168,7 +165,7 @@ func TestManualCompaction(t *testing.T) {
 	if !changed {
 		t.Fatal("Compact reported nothing to replace")
 	}
-	msgs := ag.history.Messages()
+	msgs := mustView(t, ag).Messages()
 	if len(msgs) == 0 || msgs[0].Role != llm.RoleSystem {
 		t.Fatalf("messages = %+v, want a leading summary", msgs)
 	}
@@ -220,14 +217,14 @@ func TestCompactionCutsAtStepBoundary(t *testing.T) {
 		}
 	}
 
-	ag.lastPromptEstimate = ag.estimateRequest(ag.history.Messages())
+	ag.lastPromptEstimate = ag.estimateRequest(mustView(t, ag).Messages())
 	ag.lastPromptTokens = 1800 // the hard limit is ~1725 for this window
 
 	if err := ag.maybeCompact(context.Background(), true); err != nil {
 		t.Fatalf("maybeCompact: %v", err)
 	}
 
-	msgs := ag.history.Messages()
+	msgs := mustView(t, ag).Messages()
 	if len(msgs) != 4 {
 		t.Fatalf("messages = %d, want summary plus the last two steps: %+v", len(msgs), msgs)
 	}
@@ -239,13 +236,7 @@ func TestCompactionCutsAtStepBoundary(t *testing.T) {
 		t.Fatalf("last event = %#v, want an auto_step compaction", last)
 	}
 
-	replayed := newHistoryProjection()
-	for _, ev := range rec.events {
-		if err := replayed.Apply(ev); err != nil {
-			t.Fatalf("replay %s: %v", ev.Type(), err)
-		}
-	}
-	if got := replayed.Messages(); !reflect.DeepEqual(got, msgs) {
+	if got := projectEvents(t, rec.events).Messages(); !reflect.DeepEqual(got, msgs) {
 		t.Fatalf("replayed messages = %+v, want %+v", got, msgs)
 	}
 }

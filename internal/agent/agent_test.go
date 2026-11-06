@@ -247,7 +247,7 @@ func TestTurnAbortDuringStreamPersistsPartialOutput(t *testing.T) {
 		t.Fatal("no TurnAborted event")
 	}
 
-	msgs := ag.history.Messages()
+	msgs := mustView(t, ag).Messages()
 	if len(msgs) != 2 || msgs[0].Role != llm.RoleUser || msgs[1].Role != llm.RoleAssistant {
 		t.Fatalf("history = %+v, want user + assistant", msgs)
 	}
@@ -316,7 +316,7 @@ func TestTurnAbortDuringToolsPairsEveryCall(t *testing.T) {
 
 	drainTurn(t, ag)
 
-	msgs := ag.history.Messages()
+	msgs := mustView(t, ag).Messages()
 	if len(msgs) != 5 {
 		t.Fatalf("history = %+v, want user, assistant, two results, assistant", msgs)
 	}
@@ -347,7 +347,7 @@ func TestTurnRunsToolsAndLoops(t *testing.T) {
 		t.Fatalf("output = %q, want done", turn.Output())
 	}
 
-	h := ag.history.Messages()
+	h := mustView(t, ag).Messages()
 	if len(h) != 4 {
 		t.Fatalf("history length = %d: %+v", len(h), h)
 	}
@@ -386,16 +386,37 @@ func TestAbortReplayMatchesLive(t *testing.T) {
 	close(g.release)
 	<-done
 
-	live := ag.history.Messages()
+	live := mustView(t, ag).Messages()
 
-	replayed := newHistoryProjection()
-	for _, ev := range rec.events {
-		if err := replayed.Apply(ev); err != nil {
-			t.Fatalf("replay %s: %v", ev.Type(), err)
-		}
-	}
-	got := replayed.Messages()
+	got := projectEvents(t, rec.events).Messages()
 	if !reflect.DeepEqual(got, live) {
 		t.Fatalf("replayed history differs from live:\nlive: %+v\nreplay: %+v", live, got)
+	}
+}
+
+// A resumed agent must project the same view as the one that wrote the log:
+// reading the transcript and running live are the same fold over the same
+// events.
+func TestResumedViewMatchesLive(t *testing.T) {
+	rec := &memRecorder{}
+	writer := New(
+		&scriptedStreamer{resps: []*llm.Response{
+			{Output: []llm.OutputItem{{Type: llm.ItemFunctionCall, CallID: "c1", Name: "echo", Arguments: `{}`}}},
+			{Output: []llm.OutputItem{messageItem("m2", "done")}},
+		}},
+		WithTools(&fakeTools{res: map[string]tool.Result{"echo": {Output: "ok"}}}),
+		WithTranscriptRecorder(rec),
+	)
+	if _, err := writer.Turn(context.Background(), "hi"); err != nil {
+		t.Fatalf("Turn: %v", err)
+	}
+	live := mustView(t, writer).Messages()
+
+	resumed := New(&scriptedStreamer{}, WithTranscriptRecorder(rec))
+	if err := resumed.loadEvents(); err != nil {
+		t.Fatalf("loadEvents: %v", err)
+	}
+	if got := mustView(t, resumed).Messages(); !reflect.DeepEqual(got, live) {
+		t.Fatalf("resumed view differs from live:\nlive: %+v\nresumed: %+v", live, got)
 	}
 }

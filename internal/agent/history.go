@@ -32,6 +32,9 @@ type historyEntry struct {
 // historyProjection materializes the request history from transcript events,
 // the source of truth. Entries stay ordered by sequence: a compaction summary
 // takes over the sequence of the first entry it replaces.
+//
+// A projection is produced only by Project: the live agent and a replay from
+// disk therefore run the same fold over the same events and cannot diverge.
 type historyProjection struct {
 	entries []historyEntry
 	// turns and steps hold the sequences compaction may cut before: a user
@@ -50,6 +53,19 @@ type historyProjection struct {
 
 func newHistoryProjection() *historyProjection {
 	return &historyProjection{pending: make(map[string]string)}
+}
+
+// Project folds the whole event log into its request view. It is the only
+// producer of a projection; a projection handed out by anything else would be
+// a second source of truth.
+func Project(events []transcript.Event) (*historyProjection, error) {
+	h := newHistoryProjection()
+	for _, ev := range events {
+		if err := h.Apply(ev); err != nil {
+			return nil, err
+		}
+	}
+	return h, nil
 }
 
 // Apply folds one transcript event into the projection. Reasoning and turn/step

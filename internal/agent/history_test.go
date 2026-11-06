@@ -11,13 +11,32 @@ import (
 
 func applyEvents(t *testing.T, events ...transcript.Event) *historyProjection {
 	t.Helper()
-	h := newHistoryProjection()
+	sequenced := make([]transcript.Event, len(events))
 	for i, ev := range events {
-		if err := h.Apply(transcript.WithSeq(ev, int64(i+1))); err != nil {
-			t.Fatalf("apply %s: %v", ev.Type(), err)
-		}
+		sequenced[i] = transcript.WithSeq(ev, int64(i+1))
+	}
+	return projectEvents(t, sequenced)
+}
+
+// projectEvents is the only way a projection is produced, so the tests run the
+// same fold the agent runs.
+func projectEvents(t *testing.T, events []transcript.Event) *historyProjection {
+	t.Helper()
+	h, err := Project(events)
+	if err != nil {
+		t.Fatalf("project: %v", err)
 	}
 	return h
+}
+
+// mustView projects an agent's event log for assertions.
+func mustView(t *testing.T, a *Agent) *historyProjection {
+	t.Helper()
+	v, err := a.view()
+	if err != nil {
+		t.Fatalf("view: %v", err)
+	}
+	return v
 }
 
 func roles(msgs []llm.Message) []llm.Role {
