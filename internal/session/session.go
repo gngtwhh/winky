@@ -289,12 +289,14 @@ func List(agentDir, cwd string) ([]Summary, error) {
 		if err != nil || !samePath(meta.Cwd, cwd) {
 			continue
 		}
+		title, hasContent, scanErr := scanContent(filepath.Join(dir, "transcript.jsonl"))
+		if scanErr == nil && !hasContent {
+			// A killed process leaves a session directory behind that never
+			// recorded a conversation: hide it instead of offering it up.
+			continue
+		}
 		meta.ID = entry.Name()
-		out = append(out, Summary{
-			Meta:  meta,
-			Title: sessionTitle(filepath.Join(dir, "transcript.jsonl")),
-			InUse: inUse(dir),
-		})
+		out = append(out, Summary{Meta: meta, Title: title, InUse: inUse(dir)})
 	}
 
 	sort.SliceStable(out, func(i, j int) bool {
@@ -319,17 +321,12 @@ func samePath(a, b string) bool {
 	return runtime.GOOS == "windows" && strings.EqualFold(ca, cb)
 }
 
-// sessionTitle derives a one-line title from the first user message; a session
-// without one has no title.
-func sessionTitle(path string) string {
-	title, _, _ := scanUserMessage(path)
-	return title
-}
-
-// scanUserMessage stops at the first user message, which titles the session and
-// proves it holds a conversation worth keeping. Unreadable records count as a
-// conversation, so nothing deletes data it cannot inspect.
-func scanUserMessage(path string) (title string, talked bool, err error) {
+// scanContent stops at the first user message, which titles the session, and
+// reports whether the transcript holds anything worth keeping. Turn and step
+// markers are not a conversation; a failed turn is, because it records what the
+// user asked and why it failed. Unreadable records count as content, so nothing
+// deletes data it cannot inspect.
+func scanContent(path string) (title string, hasContent bool, err error) {
 	file, err := os.Open(path)
 	if err != nil {
 		if errors.Is(err, fs.ErrNotExist) {
@@ -350,20 +347,22 @@ func scanUserMessage(path string) (title string, talked bool, err error) {
 		if decodeErr != nil {
 			return "", true, nil
 		}
-		msg, ok := ev.(transcript.UserMessage)
-		if !ok {
-			continue
+		switch e := ev.(type) {
+		case transcript.UserMessage:
+			title := strings.Join(strings.Fields(e.Content), " ")
+			if r := []rune(title); len(r) > titleRunes {
+				title = string(r[:titleRunes]) + "…"
+			}
+			return title, true, nil
+		case transcript.AssistantOutputMessage, transcript.ToolResult,
+			transcript.CompactionSummary, transcript.TurnFailed:
+			hasContent = true
 		}
-		title := strings.Join(strings.Fields(msg.Content), " ")
-		if r := []rune(title); len(r) > titleRunes {
-			title = string(r[:titleRunes]) + "…"
-		}
-		return title, true, nil
 	}
 	if err := scanner.Err(); err != nil {
 		return "", false, err
 	}
-	return "", false, nil
+	return "", hasContent, nil
 }
 
 // MetaPath returns the session metadata file path.
@@ -373,7 +372,7 @@ func (s *Session) MetaPath() string { return s.metaPath }
 func (s *Session) TranscriptPath() string { return s.transcriptPath }
 
 // Close releases the session lock and updates meta.json's updated_at. A session
-// that never recorded a user message is removed instead, so quitting right
+// that never recorded a conversation is removed instead, so quitting right
 // after launch leaves no empty history behind. It is safe to call more than
 // once.
 func (s *Session) Close() error {
@@ -386,7 +385,7 @@ func (s *Session) Close() error {
 
 	// Only an inspected-and-empty transcript is removed; an unreadable one is
 	// kept, because deleting data is worse than leaving an empty session.
-	if _, talked, err := scanUserMessage(s.transcriptPath); err == nil && !talked {
+	if _, hasContent, err := scanContent(s.transcriptPath); err == nil && !hasContent {
 		unlockErr := s.releaseLock()
 		return errors.Join(unlockErr, os.RemoveAll(s.Dir))
 	}
