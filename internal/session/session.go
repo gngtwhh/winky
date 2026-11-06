@@ -321,11 +321,8 @@ func samePath(a, b string) bool {
 	return runtime.GOOS == "windows" && strings.EqualFold(ca, cb)
 }
 
-// scanContent stops at the first user message, which titles the session, and
-// reports whether the transcript holds anything worth keeping. Turn and step
-// markers are not a conversation; a failed turn is, because it records what the
-// user asked and why it failed. Unreadable records count as content, so nothing
-// deletes data it cannot inspect.
+// scanContent titles the session and reports whether it has content.
+// Failed/aborted turns count, as do unreadable records (never delete those).
 func scanContent(path string) (title string, hasContent bool, err error) {
 	file, err := os.Open(path)
 	if err != nil {
@@ -355,7 +352,7 @@ func scanContent(path string) (title string, hasContent bool, err error) {
 			}
 			return title, true, nil
 		case transcript.AssistantOutputMessage, transcript.ToolResult,
-			transcript.CompactionSummary, transcript.TurnFailed:
+			transcript.CompactionSummary, transcript.TurnFailed, transcript.TurnAborted:
 			hasContent = true
 		}
 	}

@@ -208,15 +208,14 @@ func (m *model) lastCard(k cardKind) *card {
 	return nil
 }
 
-// markCancelled abandons the current turn: its late events and its command
-// result are both discarded, and the view returns to idle immediately.
+// markCancelled asks the agent to abort the current turn. The view stays busy
+// until TurnAborted arrives; late deltas are discarded.
 func (m *model) markCancelled() {
 	if m.cancelled == nil {
 		m.cancelled = make(map[int]bool)
 	}
 	m.cancelled[m.turn] = true
-	m.streaming = false
-	m.dirty = false
+	m.cancelling = true
 }
 
 // freezeLiveCards closes out any card still marked live, which happens when a

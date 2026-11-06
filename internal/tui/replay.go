@@ -50,7 +50,17 @@ func (m *model) replayCards(events []transcript.Event) {
 		case transcript.ToolResult:
 			if i, ok := calls[e.CallID]; ok {
 				m.history[i].Output = e.Output
+				m.history[i].IsError = e.Aborted
 			}
+
+		case transcript.TurnAborted:
+			m.history = append(m.history, card{
+				Kind: cardNotice,
+				Text: "request aborted",
+			})
+
+		case transcript.TurnFailed:
+			m.history = append(m.history, card{Kind: cardError, Text: e.Error})
 
 		case transcript.StepEnd:
 			// Usage is persisted per request, so a resumed session shows what it

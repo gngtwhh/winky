@@ -67,6 +67,11 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case tea.KeyPressMsg:
 		if m.perm != nil {
+			// y/n answer the prompt; esc cancels the turn (and unblocks it).
+			if key.Matches(msg, m.keys.Cancel) {
+				m.perm = nil
+				return m.cancelTurn()
+			}
 			return m.handlePermKey(msg)
 		}
 		return m.handleKey(msg)
@@ -118,13 +123,7 @@ func (m model) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 			m.status = "compaction cancelled"
 			return m, nil
 		}
-		if m.turnCanc != nil {
-			m.turnCanc()
-			m.turnCanc = nil
-			m.markCancelled()
-			m.status = "Turn cancelled"
-		}
-		return m, nil
+		return m.cancelTurn()
 
 	case key.Matches(msg, m.keys.Send) && k.Mod&tea.ModAlt == 0:
 		// Plain enter sends; alt+enter falls through to the textarea.
@@ -157,16 +156,31 @@ func (m model) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	return m, cmd
 }
 
-// handlePermKey answers the open permission prompt: y allows, n/esc denies.
+// handlePermKey answers the open permission prompt: y allows, n denies.
 func (m model) handlePermKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	allow := key.Matches(msg, key.NewBinding(key.WithKeys("y", "Y")))
-	deny := key.Matches(msg, key.NewBinding(key.WithKeys("n", "N", "esc")))
+	deny := key.Matches(msg, key.NewBinding(key.WithKeys("n", "N")))
 	if !allow && !deny {
 		return m, nil
 	}
 	m.perm.reply <- allow
 	m.perm = nil
 	m.status = ""
+	return m, nil
+}
+
+// cancelTurn asks the running turn to stop. The view stays busy until the agent
+// settles it with TurnAborted, so a new turn cannot overlap it.
+func (m model) cancelTurn() (tea.Model, tea.Cmd) {
+	if m.turnCanc == nil && !m.cancelling {
+		return m, nil
+	}
+	if m.turnCanc != nil {
+		m.turnCanc()
+		m.turnCanc = nil
+	}
+	m.markCancelled()
+	m.status = "cancelling..."
 	return m, nil
 }
 
@@ -188,9 +202,8 @@ func (m model) handleMouse(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 // handleEvent mutates the model, so it runs on a pointer to Update's local copy.
 //
-// Delta events are gated on m.streaming so a cancelled turn's late deltas cannot
-// resurrect the streaming state; terminal events still record usage after the
-// turn settled, but are dropped for a cancelled turn.
+// Deltas are gated on m.streaming and the cancelled marker. Terminal events are
+// always processed: TurnAborted settles a cancel, TurnEnd a completed answer.
 func (m *model) handleEvent(e schema.Event) tea.Cmd {
 	switch ev := e.(type) {
 	case schema.TurnStart:
@@ -293,9 +306,6 @@ func (m *model) handleEvent(e schema.Event) tea.Cmd {
 		})
 
 	case schema.TurnEnd:
-		if m.cancelled[m.turn] {
-			return nil
-		}
 		// Usage rides the terminal event; record it even if the command result
 		// already settled this turn.
 		m.usage = ev.Usage
@@ -310,22 +320,34 @@ func (m *model) handleEvent(e schema.Event) tea.Cmd {
 		return nil
 
 	case schema.TurnFailed:
-		if m.cancelled[m.turn] {
-			return nil
-		}
 		m.usage = ev.Usage
 		m.totalUsage = ev.TotalUsage
 		if !m.streaming {
 			m.rebuild()
 			return nil
 		}
-		// Drop any partial live blocks from the failed turn.
-		m.history = m.history[:m.turnStartIdx]
-		m.liveBlocks = nil
+		// Keep the progress made before the failure; the error card explains it.
+		m.applyTurn(ev.Turn)
 		m.finishTurn()
 		m.err = ev.Err
 		m.status = ""
 		m.appendCard(card{Kind: cardError, Text: ev.Err.Error(), At: time.Now()})
+		return nil
+
+	case schema.TurnAborted:
+		m.usage = ev.Usage
+		m.totalUsage = ev.TotalUsage
+		if !m.streaming {
+			m.rebuild()
+			return nil
+		}
+		// Render the partial turn recorded before the abort.
+		m.applyTurn(ev.Turn)
+		m.finishTurn()
+		m.perm = nil
+		m.err = nil
+		m.status = ""
+		m.appendCard(card{Kind: cardNotice, Text: "request aborted", At: time.Now()})
 		return nil
 	}
 	return nil
@@ -354,7 +376,15 @@ func (m *model) ensureBlock(key blockKey) int {
 }
 
 func (m *model) applyTurn(turn schema.Turn) {
+	// Notices such as context-compacted are not turn blocks; keep them.
+	var notices []card
+	for _, c := range m.history[m.turnStartIdx:] {
+		if c.Kind == cardNotice && !c.Live {
+			notices = append(notices, c)
+		}
+	}
 	m.history = m.history[:m.turnStartIdx]
+	m.history = append(m.history, notices...)
 	results := make(map[string]schema.ToolResult, len(turn.ToolResults))
 	for _, r := range turn.ToolResults {
 		results[r.CallID] = r
@@ -440,13 +470,17 @@ func parsePerm(s string) (tool.Permission, bool) {
 // It takes and returns the model by value: Update must hand back the mutated
 // copy, so a pointer receiver here would silently drop the change.
 func (m model) handleTurnResult(res turnResult) (tea.Model, tea.Cmd) {
-	if m.cancelled[res.TurnID] {
-		// The user abandoned this turn: forget it and drop the result.
-		delete(m.cancelled, res.TurnID)
-		return m, nil
-	}
 	if res.TurnID != m.turn {
 		// A superseded turn: drop it entirely.
+		return m, nil
+	}
+
+	if res.Aborted || m.cancelling || m.cancelled[res.TurnID] {
+		// TurnAborted (or TurnEnd, if the answer completed first) is the
+		// authoritative settle.
+		if !m.streaming {
+			delete(m.cancelled, res.TurnID)
+		}
 		return m, nil
 	}
 
@@ -470,11 +504,11 @@ func (m model) handleTurnResult(res turnResult) (tea.Model, tea.Cmd) {
 	}
 
 	m.finishTurn()
+	// The result may be partial; render it before the error card.
+	m.applyTurn(res.Result)
 	if res.Err != nil {
 		m.err = res.Err
 		m.appendCard(card{Kind: cardError, Text: res.Err.Error(), At: time.Now()})
-	} else {
-		m.applyTurn(res.Result)
 	}
 	m.rebuild()
 	return m, nil
@@ -552,12 +586,16 @@ func (m model) submit() (tea.Model, tea.Cmd) {
 	// The agent appends the user message to its own history, so the TUI owns
 	// the user side of the view: echo it before clearing the input.
 	m.appendCard(card{Kind: cardUser, Text: text, At: time.Now()})
+	// Set here as well as on TurnStart: applyTurn must stay correct if the turn
+	// is cancelled before its TurnStart arrives.
+	m.turnStartIdx = len(m.history)
 	m.input.Reset()
 	m.liveBlocks = nil
 	m.usage = llm.TokenUsage{}
 
 	m.turn++
 	m.streaming = true
+	m.cancelling = false
 	m.follow = true
 	m.dirty = false
 	m.err = nil

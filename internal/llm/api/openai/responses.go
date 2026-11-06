@@ -64,9 +64,28 @@ func consumeResponsesStream(
 	// keyed by item_id while the round-trip needs call_id.
 	toolCallIDs := make(map[string]string)
 
+	// send forwards one chunk unless cancelled; a cancelled stream still gets a
+	// terminal ResponseEnd so the agent can tell an abort from a truncation.
+	send := func(chunk llm.Chunk) bool {
+		select {
+		case ch <- chunk:
+			return true
+		case <-ctx.Done():
+			return false
+		}
+	}
+	canceled := func() {
+		ch <- llm.ResponseEnd{
+			Timestamp:  time.Now(),
+			StopReason: llm.StopReasonCanceled,
+			Err:        ctx.Err(),
+		}
+	}
+
 	for stream.Next() {
 		select {
 		case <-ctx.Done():
+			canceled()
 			return
 		default:
 		}
@@ -76,8 +95,13 @@ func consumeResponsesStream(
 		switch e := event.AsAny().(type) {
 		// Lifecycle.
 		case responses.ResponseCreatedEvent:
-			ch <- llm.ResponseStart{Timestamp: time.Now()}
+			if !send(llm.ResponseStart{Timestamp: time.Now()}) {
+				canceled()
+				return
+			}
 
+		// Terminal events use a direct send so a completed response wins over a
+		// racing cancellation; the consumer always drains.
 		case responses.ResponseCompletedEvent:
 			ch <- llm.ResponseEnd{
 				Timestamp:  time.Now(),
@@ -116,34 +140,55 @@ func consumeResponsesStream(
 			if e.Item.Type == "function_call" {
 				f := e.Item.AsFunctionCall()
 				toolCallIDs[e.Item.ID] = f.CallID
-				ch <- llm.ToolCallStart{CallID: f.CallID, Name: f.Name}
+				if !send(llm.ToolCallStart{CallID: f.CallID, Name: f.Name}) {
+					canceled()
+					return
+				}
 			}
 
 		case responses.ResponseFunctionCallArgumentsDeltaEvent:
-			ch <- llm.ToolCallArgsDelta{
+			if !send(llm.ToolCallArgsDelta{
 				CallID: toolCallID(toolCallIDs, e.ItemID),
 				Delta:  e.Delta,
+			}) {
+				canceled()
+				return
 			}
 
 		case responses.ResponseFunctionCallArgumentsDoneEvent:
-			ch <- llm.ToolCallEnd{
+			if !send(llm.ToolCallEnd{
 				CallID:    toolCallID(toolCallIDs, e.ItemID),
 				Arguments: e.Arguments,
+			}) {
+				canceled()
+				return
 			}
 
 		// Text deltas. Part order is surfaced by the terminal Response; the
 		// content_index / summary_index carried here are not needed.
 		case responses.ResponseReasoningTextDeltaEvent:
-			ch <- llm.ReasoningDelta{ItemID: e.ItemID, Text: e.Delta}
+			if !send(llm.ReasoningDelta{ItemID: e.ItemID, Text: e.Delta}) {
+				canceled()
+				return
+			}
 
 		case responses.ResponseReasoningSummaryTextDeltaEvent:
-			ch <- llm.ReasoningSummaryDelta{ItemID: e.ItemID, Text: e.Delta}
+			if !send(llm.ReasoningSummaryDelta{ItemID: e.ItemID, Text: e.Delta}) {
+				canceled()
+				return
+			}
 
 		case responses.ResponseTextDeltaEvent:
-			ch <- llm.OutputDelta{ItemID: e.ItemID, Text: e.Delta}
+			if !send(llm.OutputDelta{ItemID: e.ItemID, Text: e.Delta}) {
+				canceled()
+				return
+			}
 
 		case responses.ResponseRefusalDeltaEvent:
-			ch <- llm.RefusalDelta{ItemID: e.ItemID, Text: e.Delta}
+			if !send(llm.RefusalDelta{ItemID: e.ItemID, Text: e.Delta}) {
+				canceled()
+				return
+			}
 
 		// Authoritative done events; their data already rides the terminal
 		// response.
@@ -162,6 +207,11 @@ func consumeResponsesStream(
 			// debug only:
 			// ch <- llm.UnknownChunk{Raw: event.RawJSON()}
 		}
+	}
+
+	if ctx.Err() != nil {
+		canceled()
+		return
 	}
 
 	if err := stream.Err(); err != nil {

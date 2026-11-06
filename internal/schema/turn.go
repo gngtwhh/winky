@@ -50,6 +50,7 @@ type ToolResult struct {
 	Name     string
 	Output   string
 	IsError  bool
+	Aborted  bool
 	Duration time.Duration
 }
 

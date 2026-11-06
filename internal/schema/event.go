@@ -84,12 +84,21 @@ type TurnEnd struct {
 	TotalUsage llm.TokenUsage
 }
 
-// TurnFailed marks a turn that ended with an error. It may still carry usage
-// when the provider reported it before failing.
+// TurnFailed marks a turn that ended with an error, carrying usage and the
+// partial Turn assembled before it.
 type TurnFailed struct {
 	Err        error
+	Turn       Turn
 	Usage      llm.TokenUsage
 	TotalUsage llm.TokenUsage
+}
+
+// TurnAborted marks a user-cancelled turn and carries its partial result.
+type TurnAborted struct {
+	Turn       Turn
+	Usage      llm.TokenUsage
+	TotalUsage llm.TokenUsage
+	Reason     string
 }
 
 func (TurnStart) agentEventType() string        { return "turn_start" }
@@ -109,3 +118,4 @@ func (ToolCallEnd) agentEventType() string { return "tool_call_end" }
 func (ToolResult) agentEventType() string  { return "tool_result" }
 func (TurnEnd) agentEventType() string     { return "turn_end" }
 func (TurnFailed) agentEventType() string  { return "turn_failed" }
+func (TurnAborted) agentEventType() string { return "turn_aborted" }

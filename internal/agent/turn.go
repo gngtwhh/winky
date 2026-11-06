@@ -21,6 +21,102 @@ const (
 	BlockToolCall         = schema.BlockToolCall
 )
 
+// turnDraft accumulates streamed fragments so an interrupted response can be
+// persisted. The terminal Response stays authoritative on success.
+type turnDraft struct {
+	blocks []draftBlock
+	index  map[draftKey]int
+}
+
+type draftBlock struct {
+	block    Block
+	complete bool
+}
+
+type draftKey struct {
+	kind BlockKind
+	id   string
+}
+
+func newTurnDraft() *turnDraft {
+	return &turnDraft{index: make(map[draftKey]int)}
+}
+
+// text appends a text delta to the block named by kind and id.
+func (d *turnDraft) text(kind BlockKind, id, text string) {
+	if text == "" {
+		return
+	}
+	key := draftKey{kind: kind, id: id}
+	if i, ok := d.index[key]; ok {
+		d.blocks[i].block.Text += text
+		return
+	}
+	d.index[key] = len(d.blocks)
+	d.blocks = append(d.blocks, draftBlock{
+		block:    Block{Kind: kind, ID: id, Text: text},
+		complete: true,
+	})
+}
+
+// startTool begins a tool call; it stays incomplete until endTool so truncated
+// arguments never reach the request history.
+func (d *turnDraft) startTool(id, name string) {
+	if id == "" {
+		return
+	}
+	key := draftKey{kind: BlockToolCall, id: id}
+	if _, ok := d.index[key]; ok {
+		return
+	}
+	d.index[key] = len(d.blocks)
+	d.blocks = append(d.blocks, draftBlock{
+		block: Block{Kind: BlockToolCall, ID: id, Name: name},
+	})
+}
+
+func (d *turnDraft) toolArgs(id, delta string) {
+	if i, ok := d.index[draftKey{kind: BlockToolCall, id: id}]; ok {
+		d.blocks[i].block.Arguments += delta
+	}
+}
+
+func (d *turnDraft) endTool(id, args string) {
+	if id == "" {
+		return
+	}
+	key := draftKey{kind: BlockToolCall, id: id}
+	i, ok := d.index[key]
+	if !ok {
+		d.index[key] = len(d.blocks)
+		d.blocks = append(d.blocks, draftBlock{
+			block: Block{Kind: BlockToolCall, ID: id},
+		})
+		i = len(d.blocks) - 1
+	}
+	if args != "" {
+		d.blocks[i].block.Arguments = args
+	}
+	d.blocks[i].complete = true
+}
+
+// Turn returns the blocks a cancelled or failed stream produced, dropping
+// incomplete tool calls whose arguments are not valid JSON.
+func (d *turnDraft) Turn() Turn {
+	out := make([]Block, 0, len(d.blocks))
+	for _, b := range d.blocks {
+		if b.block.Kind == BlockToolCall {
+			if !b.complete {
+				continue
+			}
+		} else if b.block.Text == "" {
+			continue
+		}
+		out = append(out, b.block)
+	}
+	return Turn{Blocks: out}
+}
+
 // turnFromResponse converts the terminal response into a Turn; nil yields an
 // empty Turn.
 func turnFromResponse(resp *llm.Response) Turn {

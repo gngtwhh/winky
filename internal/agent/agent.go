@@ -23,6 +23,10 @@ const maxSteps = 100
 // events into the same projection and append to the same transcript.
 var ErrBusy = errors.New("agent: a turn or compaction is already running")
 
+// ErrAborted reports a turn the user cancelled. The partial Turn is still
+// returned and the transcript is closed with TurnAborted.
+var ErrAborted = errors.New("agent: turn aborted")
+
 const (
 	// maxStreamRetries bounds how often one model request is retried.
 	maxStreamRetries = 3
@@ -127,6 +131,9 @@ func New(streamer llm.Streamer, opts ...Option) *Agent {
 // Turn sends one user message and loops until the model answers without calling
 // a tool: each response that asks for tools is executed and fed back, then the
 // model is asked again.
+//
+// A cancelled turn is kept: its user message, partial output and tool calls are
+// closed by TurnAborted, so "continue" can resume the partial work.
 func (a *Agent) Turn(ctx context.Context, input string) (Turn, error) {
 	if !a.busy.TryLock() {
 		return Turn{}, ErrBusy
@@ -141,38 +148,45 @@ func (a *Agent) Turn(ctx context.Context, input string) (Turn, error) {
 	)
 
 	if err := a.loadHistory(); err != nil {
-		return Turn{}, a.fail(err, turnUsage)
+		return a.closeTurn(ctx, err, turnUsage, turn, false)
 	}
 	if err := a.record(transcript.TurnStart{Timestamp: startTime}); err != nil {
-		return Turn{}, a.fail(err, turnUsage)
+		return a.closeTurn(ctx, err, turnUsage, turn, false)
 	}
 	a.emit(schema.TurnStart{Timestamp: startTime})
 
-	// Compact before the user message is recorded, so this turn is never
-	// summarized.
+	// Record before anything cancellable, so an abort always has a request to
+	// close.
+	if err := a.record(transcript.UserMessage{Content: input}); err != nil {
+		return a.closeTurn(ctx, err, turnUsage, turn, false)
+	}
+
 	a.compactionsThisTurn = 0
 	if err := a.maybeCompact(ctx, false); err != nil {
-		return Turn{}, a.fail(err, turnUsage)
-	}
-	if err := a.record(transcript.UserMessage{Content: input}); err != nil {
-		return Turn{}, a.fail(err, turnUsage)
+		return a.closeTurn(ctx, err, turnUsage, turn, false)
 	}
 
 	for step := 0; ; step++ {
 		if step >= maxSteps {
-			return Turn{}, a.fail(fmt.Errorf("turn exceeded %d model calls", maxSteps), turnUsage)
+			return a.closeTurn(
+				ctx, fmt.Errorf("turn exceeded %d model calls", maxSteps),
+				turnUsage, turn, false,
+			)
 		}
 
 		// The previous step is closed, so the history is still whole tool-call
 		// groups here.
 		if step > 0 {
 			if err := a.maybeCompact(ctx, true); err != nil {
-				return Turn{}, a.fail(err, turnUsage)
+				return a.closeTurn(ctx, err, turnUsage, turn, false)
 			}
+		}
+		if ctx.Err() != nil {
+			return a.closeTurn(ctx, ctx.Err(), turnUsage, turn, false)
 		}
 
 		if err := a.record(transcript.StepStart{Timestamp: time.Now()}); err != nil {
-			return Turn{}, a.fail(err, turnUsage)
+			return a.closeTurn(ctx, err, turnUsage, turn, false)
 		}
 
 		req := llm.Request{
@@ -186,7 +200,7 @@ func (a *Agent) Turn(ctx context.Context, input string) (Turn, error) {
 			req.Tools = a.tools.Specs()
 		}
 
-		resp, usage, retried, err := a.stream(ctx, req)
+		resp, usage, retried, draft, err := a.stream(ctx, req)
 		turnUsage = turnUsage.Add(retried).Add(usage)
 		if usage.PromptTokens > 0 {
 			// The prompt-token count is the exact size of the request just
@@ -196,14 +210,18 @@ func (a *Agent) Turn(ctx context.Context, input string) (Turn, error) {
 			a.emit(schema.ContextUsage{Tokens: usage.PromptTokens})
 		}
 		if err != nil {
-			_ = a.record(transcript.StepEnd{Timestamp: time.Now(), Usage: usagePtr(usage)})
-			return Turn{}, a.fail(err, turnUsage)
+			// Persist the partial step and pair its completed tool calls.
+			if recErr := a.recordStep(draft); recErr != nil {
+				err = recErr
+			}
+			turn.Blocks = append(turn.Blocks, draft.Blocks...)
+			a.appendUnresultedToolCalls(&turn, draft.ToolCalls(), ctx.Err() != nil)
+			return a.closeTurn(ctx, err, turnUsage, turn, true)
 		}
 
 		stepTurn := turnFromResponse(resp)
 		if err := a.recordStep(stepTurn); err != nil {
-			_ = a.record(transcript.StepEnd{Timestamp: time.Now(), Usage: usagePtr(usage)})
-			return Turn{}, a.fail(err, turnUsage)
+			return a.closeTurn(ctx, err, turnUsage, turn, true)
 		}
 
 		turn.Blocks = append(turn.Blocks, stepTurn.Blocks...)
@@ -211,7 +229,7 @@ func (a *Agent) Turn(ctx context.Context, input string) (Turn, error) {
 		calls := stepTurn.ToolCalls()
 		if len(calls) == 0 {
 			if err := a.record(transcript.StepEnd{Timestamp: time.Now(), Usage: usagePtr(usage)}); err != nil {
-				return Turn{}, a.fail(err, turnUsage)
+				return a.closeTurn(ctx, err, turnUsage, turn, false)
 			}
 			break
 		}
@@ -224,30 +242,85 @@ func (a *Agent) Turn(ctx context.Context, input string) (Turn, error) {
 		results := a.runTools(ctx, tcalls)
 		turn.ToolResults = append(turn.ToolResults, results...)
 		for _, r := range results {
-			if err := a.record(transcript.ToolResult{CallID: r.CallID, Output: r.Output}); err != nil {
-				_ = a.record(transcript.StepEnd{Timestamp: time.Now(), Usage: usagePtr(usage)})
-				return Turn{}, a.fail(err, turnUsage)
+			if err := a.record(transcript.ToolResult{
+				CallID: r.CallID, Output: r.Output, Aborted: r.Aborted,
+			}); err != nil {
+				return a.closeTurn(ctx, err, turnUsage, turn, true)
 			}
 			a.emit(
 				ToolResult{
 					CallID: r.CallID, Name: r.Name, Output: r.Output,
-					IsError: r.IsError, Duration: r.Duration,
+					IsError: r.IsError, Aborted: r.Aborted, Duration: r.Duration,
 				},
 			)
 		}
 
 		if err := a.record(transcript.StepEnd{Timestamp: time.Now(), Usage: usagePtr(usage)}); err != nil {
-			return Turn{}, a.fail(err, turnUsage)
+			return a.closeTurn(ctx, err, turnUsage, turn, false)
+		}
+		// Cancelled during tools: results are paired, close before asking again.
+		if ctx.Err() != nil {
+			return a.closeTurn(ctx, ctx.Err(), turnUsage, turn, false)
 		}
 	}
 
 	if err := a.record(transcript.TurnEnd{Timestamp: time.Now()}); err != nil {
-		return Turn{}, a.fail(err, turnUsage)
+		return a.closeTurn(ctx, err, turnUsage, turn, false)
 	}
 
 	a.totalUsage = a.totalUsage.Add(turnUsage)
 	a.emit(schema.TurnEnd{Turn: turn, Usage: turnUsage, TotalUsage: a.totalUsage})
 	return turn, nil
+}
+
+// appendUnresultedToolCalls pairs committed but unexecuted tool calls with a
+// result.
+func (a *Agent) appendUnresultedToolCalls(turn *Turn, calls []Block, aborted bool) {
+	output := transcript.MissingToolResult
+	if aborted {
+		output = transcript.AbortedToolResult
+	}
+	for _, b := range calls {
+		r := ToolResult{
+			CallID: b.ID, Name: b.Name, Output: output,
+			IsError: true, Aborted: aborted,
+		}
+		_ = a.record(transcript.ToolResult{CallID: r.CallID, Output: r.Output, Aborted: aborted})
+		a.emit(schema.ToolResult{
+			CallID: r.CallID, Name: r.Name, Output: r.Output,
+			IsError: true, Aborted: aborted,
+		})
+		turn.ToolResults = append(turn.ToolResults, r)
+	}
+}
+
+// closeTurn ends the turn: TurnAborted for a cancelled context, TurnFailed
+// otherwise. stepOpen records the missing StepEnd.
+func (a *Agent) closeTurn(
+	ctx context.Context, err error, usage llm.TokenUsage, turn Turn, stepOpen bool,
+) (Turn, error) {
+	if stepOpen {
+		_ = a.record(transcript.StepEnd{Timestamp: time.Now(), Usage: usagePtr(usage)})
+	}
+	a.totalUsage = a.totalUsage.Add(usage)
+
+	if ctx.Err() != nil {
+		reason := ctx.Err().Error()
+		_ = a.record(transcript.TurnAborted{Timestamp: time.Now(), Reason: reason})
+		a.emit(schema.TurnAborted{
+			Turn: turn, Usage: usage, TotalUsage: a.totalUsage, Reason: reason,
+		})
+		return turn, fmt.Errorf("%w: %v", ErrAborted, reason)
+	}
+
+	if err == nil {
+		err = errors.New("agent: turn failed without an error")
+	}
+	_ = a.record(transcript.TurnFailed{Timestamp: time.Now(), Error: err.Error()})
+	a.emit(schema.TurnFailed{
+		Err: err, Turn: turn, Usage: usage, TotalUsage: a.totalUsage,
+	})
+	return turn, err
 }
 
 // record persists one event and folds it into the request-history projection.
@@ -368,15 +441,15 @@ func (a *Agent) recordStep(step Turn) error {
 // The usage of the last attempt is returned separately from the usage spent on
 // the failed ones: only the former describes the size of the request, which is
 // what context accounting needs.
-func (a *Agent) stream(ctx context.Context, req llm.Request) (*llm.Response, llm.TokenUsage, llm.TokenUsage, error) {
+func (a *Agent) stream(ctx context.Context, req llm.Request) (*llm.Response, llm.TokenUsage, llm.TokenUsage, Turn, error) {
 	var retried llm.TokenUsage
 	for attempt := 0; ; attempt++ {
-		resp, usage, produced, err := a.streamOnce(ctx, req)
+		resp, usage, draft, produced, err := a.streamOnce(ctx, req)
 		if err == nil {
-			return resp, usage, retried, nil
+			return resp, usage, retried, Turn{}, nil
 		}
 		if produced || attempt >= maxStreamRetries || !llm.Retryable(err) || ctx.Err() != nil {
-			return nil, usage, retried, err
+			return nil, usage, retried, draft, err
 		}
 		retried = retried.Add(usage)
 
@@ -384,20 +457,23 @@ func (a *Agent) stream(ctx context.Context, req llm.Request) (*llm.Response, llm
 		a.emit(schema.Retrying{Attempt: attempt + 1, Max: maxStreamRetries, Delay: delay, Err: err})
 		select {
 		case <-ctx.Done():
-			return nil, usage, retried, err
+			return nil, usage, retried, draft, err
 		case <-time.After(delay):
 		}
 	}
 }
 
-// streamOnce runs a single attempt, forwarding live fragments to the event
-// channel. produced reports whether anything reached the view.
-func (a *Agent) streamOnce(ctx context.Context, req llm.Request) (*llm.Response, llm.TokenUsage, bool, error) {
+// streamOnce runs one attempt, forwarding and accumulating fragments. On cancel
+// it stops forwarding but keeps draining so the partial step can be persisted.
+func (a *Agent) streamOnce(
+	ctx context.Context, req llm.Request,
+) (*llm.Response, llm.TokenUsage, Turn, bool, error) {
 	ch, err := a.streamer.Stream(ctx, req)
 	if err != nil {
-		return nil, llm.TokenUsage{}, false, err
+		return nil, llm.TokenUsage{}, Turn{}, false, err
 	}
 
+	draft := newTurnDraft()
 	stopReason := llm.StopReasonUnknown
 	var streamErr error
 	var finalResp *llm.Response
@@ -407,49 +483,70 @@ func (a *Agent) streamOnce(ctx context.Context, req llm.Request) (*llm.Response,
 	// Consume the chunk groups obtained from the stream iteration
 	// and generate corresponding events
 	for chunk := range ch {
+		// Always consume the terminal event: it carries the stop reason and usage.
+		if end, ok := chunk.(llm.ResponseEnd); ok {
+			stopReason = end.StopReason
+			streamErr = end.Err
+			finalResp = end.Response
+			if end.Response != nil && end.Response.Usage != nil {
+				usage = *end.Response.Usage
+			}
+			continue
+		}
+		if ctx.Err() != nil {
+			continue
+		}
+
 		switch c := chunk.(type) {
 		case llm.ReasoningDelta:
+			draft.text(BlockReasoning, c.ItemID, c.Text)
 			a.emit(schema.ReasoningDelta{ItemID: c.ItemID, Text: c.Text})
 			produced = true
 		case llm.ReasoningSummaryDelta:
+			draft.text(BlockReasoningSummary, c.ItemID, c.Text)
 			a.emit(schema.ReasoningSummaryDelta{ItemID: c.ItemID, Text: c.Text})
 			produced = true
 		case llm.OutputDelta:
+			draft.text(BlockMessage, c.ItemID, c.Text)
 			a.emit(schema.OutputDelta{ItemID: c.ItemID, Text: c.Text})
 			produced = true
 		case llm.RefusalDelta:
+			draft.text(BlockMessage, c.ItemID, c.Text)
 			a.emit(schema.OutputDelta{ItemID: c.ItemID, Text: c.Text})
 			produced = true
 		case llm.ToolCallStart:
+			draft.startTool(c.CallID, c.Name)
 			a.emit(schema.ToolCallStart{CallID: c.CallID, Name: c.Name})
 			produced = true
 		case llm.ToolCallArgsDelta:
+			draft.toolArgs(c.CallID, c.Delta)
 			a.emit(schema.ToolCallArgsDelta{CallID: c.CallID, Delta: c.Delta})
 			produced = true
 		case llm.ToolCallEnd:
+			draft.endTool(c.CallID, c.Arguments)
 			a.emit(schema.ToolCallEnd{CallID: c.CallID, Arguments: c.Arguments})
 			produced = true
-		case llm.ResponseEnd:
-			stopReason = c.StopReason
-			streamErr = c.Err
-			finalResp = c.Response
-			if c.Response != nil && c.Response.Usage != nil {
-				usage = *c.Response.Usage
-			}
 		}
 	}
 
-	if stopReason != llm.StopReasonDone {
-		if streamErr == nil {
-			streamErr = fmt.Errorf("stream stopped: %s", stopReason)
-		}
-		return nil, usage, produced, streamErr
+	// A completed response wins over a cancellation that raced its last chunks.
+	if stopReason == llm.StopReasonDone {
+		return finalResp, usage, Turn{}, produced, nil
 	}
-	return finalResp, usage, produced, nil
+	if ctx.Err() != nil {
+		return nil, usage, draft.Turn(), produced, ctx.Err()
+	}
+	if streamErr == nil {
+		streamErr = fmt.Errorf("stream stopped: %s", stopReason)
+	}
+	return nil, usage, draft.Turn(), produced, streamErr
 }
 
 // runTools executes the calls of one step. Calls run concurrently unless any
 // tool requires sequential execution, in which case all run in issue order.
+//
+// A derived context cancels every running tool. On cancel no new call starts,
+// unstarted calls get aborted results, and we wait so results do not race.
 func (a *Agent) runTools(ctx context.Context, calls []tool.Call) []ToolResult {
 	results := make([]ToolResult, len(calls))
 	if a.tools == nil {
@@ -457,6 +554,16 @@ func (a *Agent) runTools(ctx context.Context, calls []tool.Call) []ToolResult {
 			results[i] = ToolResult{CallID: c.ID, Name: c.Name, Output: "error: no tools are registered", IsError: true}
 		}
 		return results
+	}
+
+	toolCtx, cancel := context.WithCancel(ctx)
+	defer cancel()
+
+	aborted := func(c tool.Call) ToolResult {
+		return ToolResult{
+			CallID: c.ID, Name: c.Name, Output: transcript.AbortedToolResult,
+			IsError: true, Aborted: true,
+		}
 	}
 
 	sequential := false
@@ -468,17 +575,31 @@ func (a *Agent) runTools(ctx context.Context, calls []tool.Call) []ToolResult {
 	}
 	if sequential {
 		for i, c := range calls {
-			results[i] = a.runOne(ctx, c)
+			if toolCtx.Err() != nil {
+				results[i] = aborted(c)
+				continue
+			}
+			results[i] = a.runOne(toolCtx, c)
+			if results[i].Aborted {
+				for j := i + 1; j < len(calls); j++ {
+					results[j] = aborted(calls[j])
+				}
+				break
+			}
 		}
 		return results
 	}
 
 	var wg sync.WaitGroup
 	for i, c := range calls {
+		if toolCtx.Err() != nil {
+			results[i] = aborted(c)
+			continue
+		}
 		wg.Add(1)
 		go func(i int, c tool.Call) {
 			defer wg.Done()
-			results[i] = a.runOne(ctx, c)
+			results[i] = a.runOne(toolCtx, c)
 		}(i, c)
 	}
 	wg.Wait()
@@ -488,10 +609,16 @@ func (a *Agent) runTools(ctx context.Context, calls []tool.Call) []ToolResult {
 func (a *Agent) runOne(ctx context.Context, c tool.Call) ToolResult {
 	start := time.Now()
 	res := a.tools.Run(ctx, c)
-	return ToolResult{
+	out := ToolResult{
 		CallID: c.ID, Name: c.Name, Output: res.Output,
 		IsError: res.IsError, Duration: time.Since(start),
 	}
+	if res.Aborted {
+		out.Output = transcript.AbortedToolResult
+		out.IsError = true
+		out.Aborted = true
+	}
+	return out
 }
 
 // usagePtr converts provider usage into the stored form, or nil when the
@@ -516,15 +643,6 @@ func llmUsage(u transcript.Usage) llm.TokenUsage {
 		TotalTokens:      u.TotalTokens,
 		CachedTokens:     u.CachedTokens,
 	}
-}
-
-// fail records the accumulated usage, closes the transcript turn, and emits
-// TurnFailed before returning err.
-func (a *Agent) fail(err error, usage llm.TokenUsage) error {
-	a.totalUsage = a.totalUsage.Add(usage)
-	_ = a.record(transcript.TurnFailed{Timestamp: time.Now(), Error: err.Error()})
-	a.emit(schema.TurnFailed{Err: err, Usage: usage, TotalUsage: a.totalUsage})
-	return err
 }
 
 // emit sends one event to the events channel, blocking until a consumer reads

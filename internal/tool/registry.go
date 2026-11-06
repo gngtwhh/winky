@@ -156,6 +156,11 @@ func (r *Registry) Run(ctx context.Context, call Call) Result {
 	if err != nil {
 		res = Result{Output: "error: " + err.Error(), IsError: true}
 	}
+	// Relabel failed results only: a call that succeeded just before the cancel
+	// keeps its real output for the "continue" case.
+	if ctx.Err() != nil && res.IsError {
+		res.Aborted = true
+	}
 	res.Output = Truncate(res.Output, r.maxOutputBytes())
 	return res
 }

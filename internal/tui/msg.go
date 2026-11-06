@@ -16,9 +16,12 @@ type AgentEvent struct {
 // turnResult is what the tea.Cmd running agent.Turn resolves to. TurnID discards
 // the result of a superseded or cancelled turn.
 type turnResult struct {
-	TurnID   int
-	Result   schema.Turn
-	Err      error
+	TurnID int
+	Result schema.Turn
+	Err    error
+	// Aborted reports that the turn's context was cancelled; the authoritative
+	// settle arrives as schema.TurnAborted.
+	Aborted  bool
 	Duration time.Duration
 }
 

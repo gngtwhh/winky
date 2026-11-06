@@ -549,24 +549,36 @@ func TestFailedTurnRecordsUsage(t *testing.T) {
 	}
 }
 
-// A cancelled turn must drop its usage entirely.
-func TestCancelledTurnDropsUsage(t *testing.T) {
+// A cancelled turn is settled by TurnAborted, keeping partial output and usage.
+func TestCancelledTurnSettlesWithAbortedUsage(t *testing.T) {
 	m := newTestModel(t, newFakeAgent())
 	m.input.SetValue("hi")
 	next, _ := m.Update(keyPress(tea.KeyEnter, 0))
 	m = next.(model)
 	next, _ = m.Update(keyPress(tea.KeyEsc, 0))
 	m = next.(model)
+	if !m.cancelling || !m.streaming {
+		t.Fatal("esc must keep the turn open until the agent settles it")
+	}
 
 	m = feed(
-		t, m, AgentEvent{Event: schema.TurnEnd{
-			Turn:       turnOf("r", "hi"),
+		t, m, AgentEvent{Event: schema.TurnAborted{
+			Turn:       turnOf("r", "partial"),
 			Usage:      llm.TokenUsage{PromptTokens: 100, CompletionTokens: 50, TotalTokens: 150, CachedTokens: 50},
 			TotalUsage: llm.TokenUsage{PromptTokens: 100, CompletionTokens: 50, TotalTokens: 150, CachedTokens: 50},
 		}},
 	)
-	if m.usage.TotalTokens != 0 || m.totalUsage.TotalTokens != 0 {
-		t.Fatalf("cancelled-turn usage recorded: usage=%+v total=%+v", m.usage, m.totalUsage)
+	if m.streaming || m.cancelling {
+		t.Fatal("TurnAborted did not settle the turn")
+	}
+	if m.usage.TotalTokens != 150 || m.totalUsage.TotalTokens != 150 {
+		t.Fatalf("aborted-turn usage not recorded: usage=%+v total=%+v", m.usage, m.totalUsage)
+	}
+	if got := cardAt(t, m, cardAssistant).Text; got != "partial" {
+		t.Fatalf("assistant card = %q, want the partial output", got)
+	}
+	if got := cardAt(t, m, cardNotice).Text; got != "request aborted" {
+		t.Fatalf("notice card = %q", got)
 	}
 }
 
@@ -653,5 +665,48 @@ func TestInputGrowsAndScrolls(t *testing.T) {
 	}
 	if got := strings.Count(m.input.Value(), "\n"); got != 5 {
 		t.Fatalf("input newlines = %d, want 5 (newlines must not be blocked)", got)
+	}
+}
+
+// Permission prompts answer with y/n only; esc cancels the turn.
+func TestPermissionPromptKeys(t *testing.T) {
+	m := newTestModel(t, newFakeAgent())
+	m.input.SetValue("hi")
+	next, _ := m.Update(keyPress(tea.KeyEnter, 0))
+	m = next.(model)
+
+	reply := make(chan bool, 1)
+	m.perm = &permRequest{reply: reply}
+	next, _ = m.Update(keyPress(tea.KeyEsc, 0))
+	m = next.(model)
+
+	select {
+	case got := <-reply:
+		t.Fatalf("esc answered the prompt with %v, want no answer", got)
+	default:
+	}
+	if m.perm != nil {
+		t.Fatal("esc did not close the permission prompt")
+	}
+	if !m.cancelling {
+		t.Fatal("esc did not ask the turn to cancel")
+	}
+
+	m = newTestModel(t, newFakeAgent())
+	m.input.SetValue("hi")
+	next, _ = m.Update(keyPress(tea.KeyEnter, 0))
+	m = next.(model)
+	reply = make(chan bool, 1)
+	m.perm = &permRequest{reply: reply}
+	next, _ = m.Update(keyPress('n', 0))
+	m = next.(model)
+	if got, ok := <-reply; !ok || got {
+		t.Fatalf("n answered %v, want false", got)
+	}
+	if m.perm != nil {
+		t.Fatal("n did not close the permission prompt")
+	}
+	if m.cancelling {
+		t.Fatal("n must not cancel the turn")
 	}
 }

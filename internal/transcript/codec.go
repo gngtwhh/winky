@@ -97,6 +97,10 @@ func Decode(line []byte) (Event, error) {
 		var e TurnFailed
 		err = json.Unmarshal(env.Data, &e)
 		ev = e
+	case "turn_aborted":
+		var e TurnAborted
+		err = json.Unmarshal(env.Data, &e)
+		ev = e
 	case "step_start":
 		var e StepStart
 		err = json.Unmarshal(env.Data, &e)
@@ -144,6 +148,9 @@ func WithSeq(ev Event, seq int64) Event {
 		e.seq = seq
 		return e
 	case TurnFailed:
+		e.seq = seq
+		return e
+	case TurnAborted:
 		e.seq = seq
 		return e
 	case StepStart:

@@ -15,7 +15,9 @@ const (
 	StopReasonError      = "error"
 	StopReasonFailed     = "failed"
 	StopReasonIncomplete = "incomplete"
-	StopReasonUnknown    = "unknown"
+	// StopReasonCanceled means the caller's context ended the response.
+	StopReasonCanceled = "canceled"
+	StopReasonUnknown  = "unknown"
 )
 
 // ResponseStart marks the beginning of one model response.

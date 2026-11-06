@@ -2,12 +2,17 @@ package agent
 
 import (
 	"context"
+	"errors"
+	"reflect"
+	"strings"
+	"sync"
 	"testing"
 	"time"
 	"winky/internal/schema"
 
 	"winky/internal/llm"
 	"winky/internal/tool"
+	"winky/internal/transcript"
 )
 
 // fakeStreamer replays a fixed chunk sequence through a channel.
@@ -63,7 +68,7 @@ func drainTurn(t *testing.T, ag *Agent) []schema.Event {
 		case ev := <-ag.Events():
 			events = append(events, ev)
 			switch ev.(type) {
-			case schema.TurnEnd, schema.TurnFailed:
+			case schema.TurnEnd, schema.TurnFailed, schema.TurnAborted:
 				return events
 			}
 		case <-timeout:
@@ -174,6 +179,155 @@ func (f *fakeTools) Specs() []llm.ToolSpec                          { return nil
 func (f *fakeTools) Run(_ context.Context, c tool.Call) tool.Result { return f.res[c.Name] }
 func (f *fakeTools) Sequential(string) bool                         { return false }
 
+// gatedStreamer emits a partial output, then reports cancellation like the
+// provider adapter.
+type gatedStreamer struct {
+	started chan struct{}
+	release chan struct{}
+}
+
+func (g *gatedStreamer) Stream(ctx context.Context, _ llm.Request) (<-chan llm.Chunk, error) {
+	ch := make(chan llm.Chunk, 4)
+	go func() {
+		defer close(ch)
+		ch <- llm.ResponseStart{}
+		ch <- llm.OutputDelta{ItemID: "m", Text: "partial"}
+		close(g.started)
+		<-g.release
+		<-ctx.Done()
+		ch <- llm.ResponseEnd{StopReason: llm.StopReasonCanceled, Err: ctx.Err()}
+	}()
+	return ch, nil
+}
+
+func (g *gatedStreamer) Name() string { return "gated" }
+
+// A cancel during streaming keeps the partial output and closes the turn.
+func TestTurnAbortDuringStreamPersistsPartialOutput(t *testing.T) {
+	g := &gatedStreamer{started: make(chan struct{}), release: make(chan struct{})}
+	ag := New(g)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	done := make(chan struct{})
+	var (
+		turn Turn
+		err  error
+	)
+	go func() {
+		turn, err = ag.Turn(ctx, "hi")
+		close(done)
+	}()
+
+	// Cancel once the delta has reached the view, not before.
+	for ev := range ag.Events() {
+		if _, ok := ev.(schema.OutputDelta); ok {
+			break
+		}
+	}
+	cancel()
+	close(g.release)
+	<-done
+
+	if !errors.Is(err, ErrAborted) {
+		t.Fatalf("err = %v, want ErrAborted", err)
+	}
+	if turn.Output() != "partial" {
+		t.Fatalf("turn output = %q, want partial", turn.Output())
+	}
+
+	var aborted bool
+	for _, ev := range drainTurn(t, ag) {
+		if _, ok := ev.(schema.TurnAborted); ok {
+			aborted = true
+		}
+	}
+	if !aborted {
+		t.Fatal("no TurnAborted event")
+	}
+
+	msgs := ag.history.Messages()
+	if len(msgs) != 2 || msgs[0].Role != llm.RoleUser || msgs[1].Role != llm.RoleAssistant {
+		t.Fatalf("history = %+v, want user + assistant", msgs)
+	}
+	if !strings.Contains(msgs[1].Content, "partial") || !strings.Contains(msgs[1].Content, "aborted") {
+		t.Fatalf("assistant = %q, want partial output and abort marker", msgs[1].Content)
+	}
+}
+
+// blockingTools waits for cancellation and reports an aborted result.
+type blockingTools struct {
+	started    chan struct{}
+	once       sync.Once
+	sequential bool
+}
+
+func (b *blockingTools) Specs() []llm.ToolSpec  { return nil }
+func (b *blockingTools) Sequential(string) bool { return b.sequential }
+func (b *blockingTools) Run(ctx context.Context, c tool.Call) tool.Result {
+	b.once.Do(func() { close(b.started) })
+	<-ctx.Done()
+	return tool.Result{Output: "killed", IsError: true, Aborted: true}
+}
+
+// A cancel while tools run pairs every call: running ones become aborted and
+// sequential calls that never started are filled in too.
+func TestTurnAbortDuringToolsPairsEveryCall(t *testing.T) {
+	tools := &blockingTools{started: make(chan struct{}), sequential: true}
+	ag := New(
+		&scriptedStreamer{resps: []*llm.Response{{
+			Output: []llm.OutputItem{
+				{Type: llm.ItemFunctionCall, CallID: "c1", Name: "slow", Arguments: `{}`},
+				{Type: llm.ItemFunctionCall, CallID: "c2", Name: "slow", Arguments: `{}`},
+			},
+		}}},
+		WithTools(tools),
+	)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	done := make(chan struct{})
+	var (
+		turn Turn
+		err  error
+	)
+	go func() {
+		turn, err = ag.Turn(ctx, "hi")
+		close(done)
+	}()
+
+	<-tools.started
+	cancel()
+	<-done
+
+	if !errors.Is(err, ErrAborted) {
+		t.Fatalf("err = %v, want ErrAborted", err)
+	}
+	if len(turn.ToolResults) != 2 {
+		t.Fatalf("tool results = %+v, want 2", turn.ToolResults)
+	}
+	for _, r := range turn.ToolResults {
+		if !r.Aborted || r.Output != transcript.AbortedToolResult {
+			t.Fatalf("result = %+v, want an aborted result", r)
+		}
+	}
+
+	drainTurn(t, ag)
+
+	msgs := ag.history.Messages()
+	if len(msgs) != 5 {
+		t.Fatalf("history = %+v, want user, assistant, two results, assistant", msgs)
+	}
+	if msgs[2].Role != llm.RoleToolOutput || msgs[3].Role != llm.RoleToolOutput {
+		t.Fatalf("tool results missing from history: %+v", msgs)
+	}
+	if msgs[4].Role != llm.RoleAssistant || !strings.Contains(msgs[4].Content, "aborted") {
+		t.Fatalf("closing message = %+v, want abort marker", msgs[4])
+	}
+}
+
 func TestTurnRunsToolsAndLoops(t *testing.T) {
 	ag := New(
 		&scriptedStreamer{resps: []*llm.Response{
@@ -205,5 +359,43 @@ func TestTurnRunsToolsAndLoops(t *testing.T) {
 	}
 	if h[3].Role != llm.RoleAssistant || h[3].Content != "done" {
 		t.Fatalf("history[3] = %+v", h[3])
+	}
+}
+
+// Replaying the persisted events must reproduce the live history exactly.
+func TestAbortReplayMatchesLive(t *testing.T) {
+	g := &gatedStreamer{started: make(chan struct{}), release: make(chan struct{})}
+	rec := &memRecorder{}
+	ag := New(g, WithTranscriptRecorder(rec))
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	done := make(chan struct{})
+	go func() {
+		_, _ = ag.Turn(ctx, "hi")
+		close(done)
+	}()
+
+	for ev := range ag.Events() {
+		if _, ok := ev.(schema.OutputDelta); ok {
+			break
+		}
+	}
+	cancel()
+	close(g.release)
+	<-done
+
+	live := ag.history.Messages()
+
+	replayed := newHistoryProjection()
+	for _, ev := range rec.events {
+		if err := replayed.Apply(ev); err != nil {
+			t.Fatalf("replay %s: %v", ev.Type(), err)
+		}
+	}
+	got := replayed.Messages()
+	if !reflect.DeepEqual(got, live) {
+		t.Fatalf("replayed history differs from live:\nlive: %+v\nreplay: %+v", live, got)
 	}
 }

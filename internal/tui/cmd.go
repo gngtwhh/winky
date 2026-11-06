@@ -63,6 +63,7 @@ func doTurn(ctx context.Context, ag Agent, id int, input string) tea.Cmd {
 			TurnID:   id,
 			Result:   res,
 			Err:      err,
+			Aborted:  ctx.Err() != nil,
 			Duration: time.Since(start),
 		}
 	}

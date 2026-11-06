@@ -65,8 +65,9 @@ type ToolCall struct {
 
 type ToolResult struct {
 	baseEvent
-	CallID string `json:"call_id"`
-	Output string `json:"output"`
+	CallID  string `json:"call_id"`
+	Output  string `json:"output"`
+	Aborted bool   `json:"aborted,omitempty"`
 }
 
 func (e ToolResult) Type() string { return "tool_result" }
@@ -113,6 +114,16 @@ type TurnFailed struct {
 }
 
 func (e TurnFailed) Type() string { return "turn_failed" }
+
+// TurnAborted marks a user-cancelled turn. The request history closes it with a
+// synthetic assistant message.
+type TurnAborted struct {
+	baseEvent
+	Timestamp time.Time `json:"timestamp"`
+	Reason    string    `json:"reason,omitempty"`
+}
+
+func (e TurnAborted) Type() string { return "turn_aborted" }
 
 type StepStart struct {
 	baseEvent

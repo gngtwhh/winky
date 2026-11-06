@@ -89,6 +89,7 @@ type model struct {
 	dirty           bool   // deltas pending a coalesced rebuild
 	turn            int
 	streaming       bool
+	cancelling      bool             // esc asked for a cancel; waiting for TurnAborted
 	cancelled       map[int]bool     // turn ids cancelled by the user
 	liveBlocks      map[blockKey]int // blockKey -> history index of the live card
 	turnStartIdx    int              // history index where this turn's cards begin
@@ -222,7 +223,11 @@ func (m *model) atBottom() bool {
 
 func (m *model) finishTurn() {
 	m.streaming = false
+	m.cancelling = false
 	m.turnCanc = nil
+	m.perm = nil
 	m.dirty = false
 	m.retry = ""
+	m.status = ""
+	delete(m.cancelled, m.turn)
 }

@@ -47,6 +47,9 @@ type Call struct {
 type Result struct {
 	Output  string
 	IsError bool
+	// Aborted reports that the tool stopped because the context was cancelled;
+	// the agent replaces the output with an aborted marker.
+	Aborted bool
 }
 
 // Func adapts a typed handler into a Tool. Arguments are decoded from JSON into
