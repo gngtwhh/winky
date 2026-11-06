@@ -22,21 +22,21 @@ func failedMarker(err string) string {
 	return "[the previous request failed before completion: " + err + "]"
 }
 
-// historyEntry pairs one request message with the sequence of the event that
+// entry pairs one request message with the sequence of the event that
 // produced it; compaction ranges address those sequences.
-type historyEntry struct {
+type entry struct {
 	seq int64
 	msg llm.Message
 }
 
-// historyProjection materializes the request history from transcript events,
-// the source of truth. Entries stay ordered by sequence: a compaction summary
-// takes over the sequence of the first entry it replaces.
+// view is the model-facing state of a session, folded out of the transcript
+// event log. Entries stay ordered by sequence: a compaction summary takes over
+// the sequence of the first entry it replaces.
 //
-// A projection is produced only by Project: the live agent and a replay from
-// disk therefore run the same fold over the same events and cannot diverge.
-type historyProjection struct {
-	entries []historyEntry
+// A view is produced only by project, so the live agent and a replay from disk
+// fold the same events and cannot disagree.
+type view struct {
+	entries []entry
 	// turns and steps hold the sequences compaction may cut before: a user
 	// message starts a turn, a step start starts a step.
 	turns   []int64
@@ -51,63 +51,63 @@ type historyProjection struct {
 	turnHasAssistant bool
 }
 
-func newHistoryProjection() *historyProjection {
-	return &historyProjection{pending: make(map[string]string)}
+func newView() *view {
+	return &view{pending: make(map[string]string)}
 }
 
-// Project folds the whole event log into its request view. It is the only
-// producer of a projection; a projection handed out by anything else would be
-// a second source of truth.
-func Project(events []transcript.Event) (*historyProjection, error) {
-	h := newHistoryProjection()
+// project folds the whole event log into the view it addresses. It is the only
+// producer of a view; anything else that built one would be a second source of
+// truth.
+func project(events []transcript.Event) (*view, error) {
+	v := newView()
 	for _, ev := range events {
-		if err := h.Apply(ev); err != nil {
+		if err := v.apply(ev); err != nil {
 			return nil, err
 		}
 	}
-	return h, nil
+	return v, nil
 }
 
-// Apply folds one transcript event into the projection. Reasoning and turn/step
+// apply folds one transcript event into the view. Reasoning and turn/step
 // marker events do not become request messages; they exist for audit and
 // grouping.
-func (h *historyProjection) Apply(ev transcript.Event) error {
+func (v *view) apply(ev transcript.Event) error {
 	if ev == nil {
-		return fmt.Errorf("history: nil transcript event")
+		return fmt.Errorf("view: nil transcript event")
 	}
 	if seq := ev.Seq(); seq > 0 {
-		if seq <= h.lastSeq {
-			return fmt.Errorf("history: non-monotonic transcript sequence %d after %d", seq, h.lastSeq)
+		if seq <= v.lastSeq {
+			return fmt.Errorf("view: non-monotonic transcript sequence %d after %d", seq, v.lastSeq)
 		}
-		if h.lastSeq > 0 && seq != h.lastSeq+1 {
-			return fmt.Errorf("history: transcript sequence gap: got %d after %d", seq, h.lastSeq)
+		if v.lastSeq > 0 && seq != v.lastSeq+1 {
+			return fmt.Errorf("view: transcript sequence gap: got %d after %d", seq, v.lastSeq)
 		}
-		h.lastSeq = seq
+		v.lastSeq = seq
 	}
 
 	switch e := ev.(type) {
 	case transcript.TurnStart:
 		// A new turn with the previous one still open means it was interrupted.
-		h.repairOpenTurn(ev.Seq())
-		h.pending = make(map[string]string)
+		v.repairOpenTurn(ev.Seq())
+		v.pending = make(map[string]string)
 
 	case transcript.UserMessage:
-		h.repairOpenTurn(ev.Seq())
-		h.append(ev, llm.Message{
+		v.repairOpenTurn(ev.Seq())
+		v.append(ev.Seq(), llm.Message{
 			Role:    llm.RoleUser,
 			Content: e.Content,
 		})
 		if seq := ev.Seq(); seq > 0 {
-			h.turns = append(h.turns, seq)
+			v.turns = append(v.turns, seq)
 		}
-		h.turnOpen = true
-		h.turnUserSeq = ev.Seq()
-		h.turnHasAssistant = false
+		v.turnOpen = true
+		v.turnUserSeq = ev.Seq()
+		v.turnHasAssistant = false
 
 	case transcript.StepStart:
-		h.pending = make(map[string]string)
+		v.pending = make(map[string]string)
 		if seq := ev.Seq(); seq > 0 {
-			h.steps = append(h.steps, seq)
+			v.steps = append(v.steps, seq)
 		}
 
 	case transcript.AssistantOutputMessage:
@@ -122,107 +122,104 @@ func (h *historyProjection) Apply(ev transcript.Event) error {
 				Arguments: tc.Arguments,
 			})
 		}
-		h.appendAssistant(ev.Seq(), msg)
-		h.turnHasAssistant = true
+		v.appendAssistant(ev.Seq(), msg)
+		v.turnHasAssistant = true
 
 	case transcript.AssistantReasoningMessage, transcript.AssistantReasoningSummary:
 		// Reasoning is persisted for auditing but is not part of the
-		// provider-facing request history.
+		// provider-facing request.
 
 	case transcript.ToolResult:
-		name, ok := h.pending[e.CallID]
+		name, ok := v.pending[e.CallID]
 		if !ok {
 			// An orphan result cannot be paired with a call, so it must not
-			// enter the request history.
+			// enter the request.
 			return nil
 		}
-		h.append(ev, llm.Message{
+		v.append(ev.Seq(), llm.Message{
 			Role:       llm.RoleToolOutput,
 			Name:       name,
 			ToolCallID: e.CallID,
 			Content:    e.Output,
 		})
-		delete(h.pending, e.CallID)
+		delete(v.pending, e.CallID)
 
 	case transcript.StepEnd:
 		// Any call still pending here has no result; Messages answers it.
-		h.pending = make(map[string]string)
+		v.pending = make(map[string]string)
 
 	case transcript.TurnEnd:
-		if h.turnOpen && !h.turnHasAssistant {
-			h.appendAssistant(ev.Seq(), llm.Message{Role: llm.RoleAssistant, Content: noOutputMarker})
+		if v.turnOpen && !v.turnHasAssistant {
+			v.appendAssistant(ev.Seq(), llm.Message{Role: llm.RoleAssistant, Content: noOutputMarker})
 		}
-		h.pending = make(map[string]string)
-		h.closeTurn()
+		v.pending = make(map[string]string)
+		v.closeTurn()
 
 	case transcript.TurnFailed:
-		if h.turnOpen {
-			h.appendAssistant(ev.Seq(), llm.Message{
+		if v.turnOpen {
+			v.appendAssistant(ev.Seq(), llm.Message{
 				Role:    llm.RoleAssistant,
 				Content: failedMarker(e.Error),
 			})
 		}
-		h.pending = make(map[string]string)
-		h.closeTurn()
+		v.pending = make(map[string]string)
+		v.closeTurn()
 
 	case transcript.TurnAborted:
-		if h.turnOpen {
-			h.appendAssistant(ev.Seq(), llm.Message{
+		if v.turnOpen {
+			v.appendAssistant(ev.Seq(), llm.Message{
 				Role:    llm.RoleAssistant,
 				Content: abortedMarker,
 			})
 		}
-		h.pending = make(map[string]string)
-		h.closeTurn()
+		v.pending = make(map[string]string)
+		v.closeTurn()
 
 	case transcript.CompactionSummary:
-		h.applyCompaction(e)
+		v.applyCompaction(e)
 
 	default:
-		return fmt.Errorf("history: unsupported transcript event %q", ev.Type())
+		return fmt.Errorf("view: unsupported transcript event %q", ev.Type())
 	}
 	return nil
 }
 
 // repairOpenTurn closes a turn that never received a terminal event. The marker
 // takes the triggering event's seq, keeping it ordered immediately before it.
-func (h *historyProjection) repairOpenTurn(seq int64) {
-	if !h.turnOpen {
+func (v *view) repairOpenTurn(seq int64) {
+	if !v.turnOpen {
 		return
 	}
-	h.appendAssistant(seq, llm.Message{
+	v.appendAssistant(seq, llm.Message{
 		Role:    llm.RoleAssistant,
 		Content: interruptedMarker,
 	})
-	h.pending = make(map[string]string)
-	h.closeTurn()
+	v.pending = make(map[string]string)
+	v.closeTurn()
 }
 
 // closeTurn clears turn state only. applyCompaction uses it too, and the tool
 // group may still be live after the replaced prefix, so pending is untouched.
-func (h *historyProjection) closeTurn() {
-	h.turnOpen = false
-	h.turnUserSeq = 0
-	h.turnHasAssistant = false
+func (v *view) closeTurn() {
+	v.turnOpen = false
+	v.turnUserSeq = 0
+	v.turnHasAssistant = false
 }
 
-// append records one message under the sequence of the event that produced it.
-func (h *historyProjection) append(ev transcript.Event, msg llm.Message) {
-	h.appendSeq(ev.Seq(), msg)
-}
-
-func (h *historyProjection) appendSeq(seq int64, msg llm.Message) {
-	h.entries = append(h.entries, historyEntry{seq: seq, msg: msg})
+// append records one message under seq, the sequence of the event that
+// produced it.
+func (v *view) append(seq int64, msg llm.Message) {
+	v.entries = append(v.entries, entry{seq: seq, msg: msg})
 }
 
 // appendAssistant appends an assistant message, merging into a preceding
 // text-only assistant to avoid adjacency. Tool calls are always registered.
-func (h *historyProjection) appendAssistant(seq int64, msg llm.Message) {
+func (v *view) appendAssistant(seq int64, msg llm.Message) {
 	for _, tc := range msg.ToolCalls {
-		h.pending[tc.ID] = tc.Name
+		v.pending[tc.ID] = tc.Name
 	}
-	if n := len(h.entries); n > 0 {
-		last := &h.entries[n-1]
+	if n := len(v.entries); n > 0 {
+		last := &v.entries[n-1]
 		if last.msg.Role == llm.RoleAssistant && len(last.msg.ToolCalls) == 0 {
 			if msg.Content != "" {
 				if last.msg.Content != "" {
@@ -234,43 +231,43 @@ func (h *historyProjection) appendAssistant(seq int64, msg llm.Message) {
 			return
 		}
 	}
-	h.appendSeq(seq, msg)
+	v.append(seq, msg)
 }
 
 // applyCompaction replaces the entries addressed by the event with its summary.
 // planCompaction always starts a range at the first entry and cuts on a turn or
 // step boundary, so a range is a prefix that cannot split a tool-call group; a
 // range matching no entry is ignored.
-func (h *historyProjection) applyCompaction(e transcript.CompactionSummary) {
+func (v *view) applyCompaction(e transcript.CompactionSummary) {
 	start, end := e.ReplacedStartSeq, e.ReplacedEndSeq
 
 	kept := 0
-	for kept < len(h.entries) && h.entries[kept].seq <= end {
+	for kept < len(v.entries) && v.entries[kept].seq <= end {
 		kept++
 	}
 	if kept == 0 {
 		return
 	}
 
-	next := make([]historyEntry, 0, len(h.entries)-kept+1)
-	next = append(next, historyEntry{
+	next := make([]entry, 0, len(v.entries)-kept+1)
+	next = append(next, entry{
 		seq: start,
 		msg: llm.Message{Role: llm.RoleSystem, Content: e.Summary},
 	})
-	next = append(next, h.entries[kept:]...)
-	h.entries = next
-	h.trimUnits(end)
+	next = append(next, v.entries[kept:]...)
+	v.entries = next
+	v.trimUnits(end)
 
 	// The summary swallowed the open turn's user message: nothing left to close.
-	if h.turnOpen && h.turnUserSeq > 0 && h.turnUserSeq <= end {
-		h.closeTurn()
+	if v.turnOpen && v.turnUserSeq > 0 && v.turnUserSeq <= end {
+		v.closeTurn()
 	}
 }
 
 // trimUnits drops the boundaries that the replaced range covered.
-func (h *historyProjection) trimUnits(end int64) {
-	h.turns = trimSeqs(h.turns, end)
-	h.steps = trimSeqs(h.steps, end)
+func (v *view) trimUnits(end int64) {
+	v.turns = trimSeqs(v.turns, end)
+	v.steps = trimSeqs(v.steps, end)
 }
 
 func trimSeqs(seqs []int64, end int64) []int64 {
@@ -284,18 +281,18 @@ func trimSeqs(seqs []int64, end int64) []int64 {
 	return seqs[i:]
 }
 
-// snapshot exposes the projection for planning; the slices are read-only.
-func (h *historyProjection) snapshot() (entries []historyEntry, turns, steps []int64) {
-	return h.entries, h.turns, h.steps
+// parts exposes the view for planning; the slices are read-only.
+func (v *view) parts() (entries []entry, turns, steps []int64) {
+	return v.entries, v.turns, v.steps
 }
 
-// Messages returns the request-safe view: missing tool results answered, orphan
+// messages returns the request-safe view: missing tool results answered, orphan
 // results dropped, adjacent assistants merged.
-func (h *historyProjection) Messages() []llm.Message {
-	return messagesOf(h.entries)
+func (v *view) messages() []llm.Message {
+	return messagesOf(v.entries)
 }
 
-func messagesOf(entries []historyEntry) []llm.Message {
+func messagesOf(entries []entry) []llm.Message {
 	out := make([]llm.Message, 0, len(entries))
 	for i := 0; i < len(entries); {
 		msg := entries[i].msg

@@ -574,7 +574,7 @@ func (m model) submit() (tea.Model, tea.Cmd) {
 	}
 	if m.compactCanc != nil {
 		// A manual compaction is in flight; a turn would race it for the
-		// history and the transcript writer.
+		// view and the transcript writer.
 		m.status = "Compacting...Please wait"
 		return m, nil
 	}
@@ -583,8 +583,8 @@ func (m model) submit() (tea.Model, tea.Cmd) {
 		return m, nil
 	}
 
-	// The agent appends the user message to its own history, so the TUI owns
-	// the user side of the view: echo it before clearing the input.
+	// The agent records the user message in its own log, so the TUI owns the
+	// user side of the scrollback: echo it before clearing the input.
 	m.appendCard(card{Kind: cardUser, Text: text, At: time.Now()})
 	// Set here as well as on TurnStart: applyTurn must stay correct if the turn
 	// is cancelled before its TurnStart arrives.

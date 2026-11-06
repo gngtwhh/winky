@@ -122,11 +122,11 @@ func (a *Agent) keepBudget() int {
 // count plus the change the local estimator has seen since then, so the system
 // prompt and tool schemas cancel out.
 func (a *Agent) estimateContext() (int, error) {
-	v, err := a.view()
+	v, err := a.project()
 	if err != nil {
 		return 0, err
 	}
-	est := a.estimateRequest(v.Messages())
+	est := a.estimateRequest(v.messages())
 	if a.lastPromptTokens <= 0 {
 		return est, nil
 	}
@@ -141,9 +141,9 @@ func (a *Agent) estimateRequest(msgs []llm.Message) int {
 	return 8 + estimateMessages(msgs) + estimateText(a.systemPrompt) + a.toolTokens
 }
 
-// maybeCompact summarizes the oldest history when the next request would cross
-// the soft (turn boundary) or hard (between steps) limit. It is bounded per
-// turn, and a failed summary leaves the history untouched.
+// maybeCompact summarizes the oldest entries of the view when the next request
+// would cross the soft (turn boundary) or hard (between steps) limit. It is
+// bounded per turn, and a failed summary leaves the view untouched.
 func (a *Agent) maybeCompact(ctx context.Context, hard bool) error {
 	if a.tsRecorder == nil || a.compactionsThisTurn >= maxCompactionsPerTurn {
 		return nil
@@ -185,10 +185,10 @@ func (a *Agent) maybeCompact(ctx context.Context, hard bool) error {
 	return a.recordCompaction(plan, before, summary, kind, usage)
 }
 
-// Compact summarizes the oldest history now, regardless of the automatic
-// thresholds or whether automatic compaction is enabled. It reports false when
-// there is nothing to replace, and does not consume the automatic per-turn
-// budget. It fails with ErrBusy while a Turn is running.
+// Compact summarizes the oldest entries of the view now, regardless of the
+// automatic thresholds or whether automatic compaction is enabled. It reports
+// false when there is nothing to replace, and does not consume the automatic
+// per-turn budget. It fails with ErrBusy while a Turn is running.
 func (a *Agent) Compact(ctx context.Context) (bool, error) {
 	if !a.busy.TryLock() {
 		return false, ErrBusy
@@ -198,7 +198,7 @@ func (a *Agent) Compact(ctx context.Context) (bool, error) {
 	if a.tsRecorder == nil {
 		return false, errors.New("compaction needs a transcript recorder")
 	}
-	if err := a.loadEvents(); err != nil {
+	if err := a.loadLog(); err != nil {
 		return false, err
 	}
 
@@ -286,11 +286,11 @@ type compactionPlan struct {
 // planCompaction chooses how much to replace, preferring whole turns and
 // falling back to step boundaries when one turn alone is too large.
 func (a *Agent) planCompaction(keepBudget int) (compactionPlan, bool, error) {
-	v, err := a.view()
+	v, err := a.project()
 	if err != nil {
 		return compactionPlan{}, false, err
 	}
-	entries, turns, steps := v.snapshot()
+	entries, turns, steps := v.parts()
 	if len(entries) < 2 || entries[0].seq <= 0 || keepBudget <= 0 {
 		return compactionPlan{}, false, nil
 	}
@@ -305,23 +305,23 @@ func (a *Agent) planCompaction(keepBudget int) (compactionPlan, bool, error) {
 		return newPlan(entries, kept), true, nil
 	}
 	if kept == 0 || kept >= len(entries) {
-		// The whole history already fits the budget, so there is nothing worth
+		// The whole view already fits the budget, so there is nothing worth
 		// replacing. This is what a manual compaction reports as a no-op.
 		return compactionPlan{}, false, nil
 	}
 	return compactionPlan{}, false, fmt.Errorf(
-		"context compaction: the most recent history alone exceeds the budget; " +
+		"context compaction: the most recent turns alone exceed the budget; " +
 			"raise contextWindow, lower maxOutputTokens, or lower keepPercent",
 	)
 }
 
 // acceptedCut rejects a cut that replaces nothing or keeps more than twice the
 // budget, which would trigger again immediately.
-func acceptedCut(entries []historyEntry, kept, keepBudget int) bool {
+func acceptedCut(entries []entry, kept, keepBudget int) bool {
 	return kept > 0 && kept < len(entries) && estimateEntries(entries[kept:]) <= 2*keepBudget
 }
 
-func newPlan(entries []historyEntry, kept int) compactionPlan {
+func newPlan(entries []entry, kept int) compactionPlan {
 	return compactionPlan{
 		start: entries[0].seq,
 		end:   entries[kept-1].seq,
@@ -338,7 +338,7 @@ type unit struct {
 // buildUnits splits entries at the given sequence boundaries, cutting before the
 // first entry at or after each one. That covers both a turn start (the user
 // message itself) and a step start (which precedes the assistant message).
-func buildUnits(entries []historyEntry, starts []int64) []unit {
+func buildUnits(entries []entry, starts []int64) []unit {
 	if len(entries) == 0 {
 		return nil
 	}
@@ -357,7 +357,7 @@ func buildUnits(entries []historyEntry, starts []int64) []unit {
 
 // pickTail returns the first entry to keep: units are added newest first until
 // the next would exceed the budget, and at least one is always kept.
-func pickTail(entries []historyEntry, units []unit, keepBudget int) int {
+func pickTail(entries []entry, units []unit, keepBudget int) int {
 	kept := len(entries)
 	tokens := 0
 	for i := len(units) - 1; i >= 0; i-- {
@@ -481,7 +481,7 @@ func estimateMessages(msgs []llm.Message) int {
 	return total
 }
 
-func estimateEntries(entries []historyEntry) int {
+func estimateEntries(entries []entry) int {
 	return estimateMessages(messagesOf(entries))
 }
 

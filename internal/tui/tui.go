@@ -69,7 +69,7 @@ func WithContextWindow(tokens int) Option {
 }
 
 // WithReplay seeds the scrollback with the transcript events of a resumed
-// session. The agent replays the same transcript into its own history.
+// session. The agent folds the same transcript into its own view.
 func WithReplay(events []transcript.Event) Option {
 	return func(t *Tui) { t.replayEvents = events }
 }

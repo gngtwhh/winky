@@ -247,9 +247,9 @@ func TestTurnAbortDuringStreamPersistsPartialOutput(t *testing.T) {
 		t.Fatal("no TurnAborted event")
 	}
 
-	msgs := mustView(t, ag).Messages()
+	msgs := mustView(t, ag).messages()
 	if len(msgs) != 2 || msgs[0].Role != llm.RoleUser || msgs[1].Role != llm.RoleAssistant {
-		t.Fatalf("history = %+v, want user + assistant", msgs)
+		t.Fatalf("view = %+v, want user + assistant", msgs)
 	}
 	if !strings.Contains(msgs[1].Content, "partial") || !strings.Contains(msgs[1].Content, "aborted") {
 		t.Fatalf("assistant = %q, want partial output and abort marker", msgs[1].Content)
@@ -316,12 +316,12 @@ func TestTurnAbortDuringToolsPairsEveryCall(t *testing.T) {
 
 	drainTurn(t, ag)
 
-	msgs := mustView(t, ag).Messages()
+	msgs := mustView(t, ag).messages()
 	if len(msgs) != 5 {
-		t.Fatalf("history = %+v, want user, assistant, two results, assistant", msgs)
+		t.Fatalf("view = %+v, want user, assistant, two results, assistant", msgs)
 	}
 	if msgs[2].Role != llm.RoleToolOutput || msgs[3].Role != llm.RoleToolOutput {
-		t.Fatalf("tool results missing from history: %+v", msgs)
+		t.Fatalf("tool results missing from view: %+v", msgs)
 	}
 	if msgs[4].Role != llm.RoleAssistant || !strings.Contains(msgs[4].Content, "aborted") {
 		t.Fatalf("closing message = %+v, want abort marker", msgs[4])
@@ -347,22 +347,22 @@ func TestTurnRunsToolsAndLoops(t *testing.T) {
 		t.Fatalf("output = %q, want done", turn.Output())
 	}
 
-	h := mustView(t, ag).Messages()
-	if len(h) != 4 {
-		t.Fatalf("history length = %d: %+v", len(h), h)
+	msgs := mustView(t, ag).messages()
+	if len(msgs) != 4 {
+		t.Fatalf("view length = %d: %+v", len(msgs), msgs)
 	}
-	if h[1].Role != llm.RoleAssistant || len(h[1].ToolCalls) != 1 {
-		t.Fatalf("history[1] = %+v", h[1])
+	if msgs[1].Role != llm.RoleAssistant || len(msgs[1].ToolCalls) != 1 {
+		t.Fatalf("view[1] = %+v", msgs[1])
 	}
-	if h[2].Role != llm.RoleToolOutput || h[2].ToolCallID != "c1" {
-		t.Fatalf("history[2] = %+v", h[2])
+	if msgs[2].Role != llm.RoleToolOutput || msgs[2].ToolCallID != "c1" {
+		t.Fatalf("view[2] = %+v", msgs[2])
 	}
-	if h[3].Role != llm.RoleAssistant || h[3].Content != "done" {
-		t.Fatalf("history[3] = %+v", h[3])
+	if msgs[3].Role != llm.RoleAssistant || msgs[3].Content != "done" {
+		t.Fatalf("view[3] = %+v", msgs[3])
 	}
 }
 
-// Replaying the persisted events must reproduce the live history exactly.
+// Replaying the persisted events must reproduce the live view exactly.
 func TestAbortReplayMatchesLive(t *testing.T) {
 	g := &gatedStreamer{started: make(chan struct{}), release: make(chan struct{})}
 	rec := &memRecorder{}
@@ -386,11 +386,11 @@ func TestAbortReplayMatchesLive(t *testing.T) {
 	close(g.release)
 	<-done
 
-	live := mustView(t, ag).Messages()
+	live := mustView(t, ag).messages()
 
-	got := projectEvents(t, rec.events).Messages()
+	got := mustProject(t, rec.events).messages()
 	if !reflect.DeepEqual(got, live) {
-		t.Fatalf("replayed history differs from live:\nlive: %+v\nreplay: %+v", live, got)
+		t.Fatalf("replayed view differs from live:\nlive: %+v\nreplay: %+v", live, got)
 	}
 }
 
@@ -410,13 +410,13 @@ func TestResumedViewMatchesLive(t *testing.T) {
 	if _, err := writer.Turn(context.Background(), "hi"); err != nil {
 		t.Fatalf("Turn: %v", err)
 	}
-	live := mustView(t, writer).Messages()
+	live := mustView(t, writer).messages()
 
 	resumed := New(&scriptedStreamer{}, WithTranscriptRecorder(rec))
-	if err := resumed.loadEvents(); err != nil {
-		t.Fatalf("loadEvents: %v", err)
+	if err := resumed.loadLog(); err != nil {
+		t.Fatalf("loadLog: %v", err)
 	}
-	if got := mustView(t, resumed).Messages(); !reflect.DeepEqual(got, live) {
+	if got := mustView(t, resumed).messages(); !reflect.DeepEqual(got, live) {
 		t.Fatalf("resumed view differs from live:\nlive: %+v\nresumed: %+v", live, got)
 	}
 }

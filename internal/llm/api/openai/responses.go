@@ -411,7 +411,7 @@ func convertMessagesToInput(msgs []llm.Message) (responses.ResponseNewParamsInpu
 
 		default:
 			// An unknown role is an error: dropping it would desync the request
-			// history from the transcript.
+			// from the transcript.
 			return responses.ResponseNewParamsInputUnion{},
 				fmt.Errorf("openai-responses: unsupported message role %q", m.Role)
 		}

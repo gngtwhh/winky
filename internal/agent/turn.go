@@ -60,7 +60,7 @@ func (d *turnDraft) text(kind BlockKind, id, text string) {
 }
 
 // startTool begins a tool call; it stays incomplete until endTool so truncated
-// arguments never reach the request history.
+// arguments never reach the request.
 func (d *turnDraft) startTool(id, name string) {
 	if id == "" {
 		return

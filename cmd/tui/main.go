@@ -114,8 +114,7 @@ func main() {
 	}()
 
 	// Replay the stored transcript into the scrollback; a fresh session has
-	// none. The agent replays the same events into its request history on the
-	// first turn.
+	// none. The agent folds the same events into its view on the first turn.
 	replay, err := rec.ReadAll()
 	if err != nil {
 		log.Fatalf("read transcript: %v", err)

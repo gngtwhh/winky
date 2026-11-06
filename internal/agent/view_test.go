@@ -9,32 +9,34 @@ import (
 	"winky/internal/transcript"
 )
 
-func applyEvents(t *testing.T, events ...transcript.Event) *historyProjection {
+// viewOf builds a view from unsequenced events, numbering them as a recorder
+// would.
+func viewOf(t *testing.T, events ...transcript.Event) *view {
 	t.Helper()
 	sequenced := make([]transcript.Event, len(events))
 	for i, ev := range events {
 		sequenced[i] = transcript.WithSeq(ev, int64(i+1))
 	}
-	return projectEvents(t, sequenced)
+	return mustProject(t, sequenced)
 }
 
-// projectEvents is the only way a projection is produced, so the tests run the
-// same fold the agent runs.
-func projectEvents(t *testing.T, events []transcript.Event) *historyProjection {
+// mustProject is the only way a view is produced, so the tests run the same
+// fold the agent runs.
+func mustProject(t *testing.T, events []transcript.Event) *view {
 	t.Helper()
-	h, err := Project(events)
+	v, err := project(events)
 	if err != nil {
 		t.Fatalf("project: %v", err)
 	}
-	return h
+	return v
 }
 
-// mustView projects an agent's event log for assertions.
-func mustView(t *testing.T, a *Agent) *historyProjection {
+// mustView projects an agent's log for assertions.
+func mustView(t *testing.T, a *Agent) *view {
 	t.Helper()
-	v, err := a.view()
+	v, err := a.project()
 	if err != nil {
-		t.Fatalf("view: %v", err)
+		t.Fatalf("project: %v", err)
 	}
 	return v
 }
@@ -50,7 +52,7 @@ func roles(msgs []llm.Message) []llm.Role {
 // The original bug: an unanswered user message was adjacent to the next one.
 // The failure terminal now closes it.
 func TestFailedTurnClosesDanglingUserMessage(t *testing.T) {
-	h := applyEvents(t,
+	v := viewOf(t,
 		transcript.TurnStart{},
 		transcript.UserMessage{Content: "这是第三条测试消息，请做一些耗时操作"},
 		transcript.StepStart{},
@@ -60,7 +62,7 @@ func TestFailedTurnClosesDanglingUserMessage(t *testing.T) {
 		transcript.UserMessage{Content: "今天几点了"},
 	)
 
-	msgs := h.Messages()
+	msgs := v.messages()
 	if got, want := roles(msgs), []llm.Role{
 		llm.RoleUser, llm.RoleAssistant, llm.RoleUser,
 	}; !slices.Equal(got, want) {
@@ -73,7 +75,7 @@ func TestFailedTurnClosesDanglingUserMessage(t *testing.T) {
 
 // A partial answer followed by an abort is one assistant message, not two.
 func TestAbortedMarkerMergesIntoPartialOutput(t *testing.T) {
-	h := applyEvents(t,
+	v := viewOf(t,
 		transcript.TurnStart{},
 		transcript.UserMessage{Content: "go"},
 		transcript.StepStart{},
@@ -81,7 +83,7 @@ func TestAbortedMarkerMergesIntoPartialOutput(t *testing.T) {
 		transcript.TurnAborted{Reason: "user"},
 	)
 
-	msgs := h.Messages()
+	msgs := v.messages()
 	if len(msgs) != 2 {
 		t.Fatalf("messages = %+v, want user + one assistant", msgs)
 	}
@@ -96,7 +98,7 @@ func TestAbortedMarkerMergesIntoPartialOutput(t *testing.T) {
 
 // A tool call committed before an abort is still paired, and the turn closes.
 func TestAbortedToolCallIsPaired(t *testing.T) {
-	h := applyEvents(t,
+	v := viewOf(t,
 		transcript.TurnStart{},
 		transcript.UserMessage{Content: "read it"},
 		transcript.StepStart{},
@@ -107,7 +109,7 @@ func TestAbortedToolCallIsPaired(t *testing.T) {
 		transcript.TurnAborted{Reason: "user"},
 	)
 
-	msgs := h.Messages()
+	msgs := v.messages()
 	if len(msgs) != 4 {
 		t.Fatalf("messages = %+v, want user, assistant, tool, assistant", msgs)
 	}
@@ -121,7 +123,7 @@ func TestAbortedToolCallIsPaired(t *testing.T) {
 
 // An interrupted turn is closed when the next user message arrives.
 func TestInterruptedTurnIsClosedByNextUserMessage(t *testing.T) {
-	h := applyEvents(t,
+	v := viewOf(t,
 		transcript.TurnStart{},
 		transcript.UserMessage{Content: "first"},
 		transcript.StepStart{},
@@ -130,7 +132,7 @@ func TestInterruptedTurnIsClosedByNextUserMessage(t *testing.T) {
 		transcript.UserMessage{Content: "second"},
 	)
 
-	msgs := h.Messages()
+	msgs := v.messages()
 	if len(msgs) != 3 {
 		t.Fatalf("messages = %+v, want user, assistant, user", msgs)
 	}

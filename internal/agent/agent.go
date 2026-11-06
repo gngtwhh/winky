@@ -1,5 +1,6 @@
-// Package agent implements a multi-turn conversational agent loop: it owns the
-// history and drives the llm.Streamer so consecutive turns share context.
+// Package agent implements a multi-turn conversational agent loop: it records
+// the transcript log, projects the model-facing view from it, and drives the
+// llm.Streamer so consecutive turns share context.
 package agent
 
 import (
@@ -42,8 +43,8 @@ type Toolset interface {
 	Sequential(name string) bool
 }
 
-// Agent keeps an LLM streamer, the event log the request history is projected
-// from, and the tools it may run.
+// Agent keeps an LLM streamer, the event log its view is projected from, and
+// the tools it may run.
 type Agent struct {
 	streamer        llm.Streamer
 	model           string
@@ -54,13 +55,13 @@ type Agent struct {
 	events          chan schema.Event
 
 	totalUsage llm.TokenUsage
-	// recorded is the append-only copy of the persisted event log. It is only
-	// ever appended to, never derived, so it cannot disagree with the
-	// transcript; the request view is projected from it on demand.
-	recorded []transcript.Event
-	// loaded is false until the persisted transcript has been read.
+	// log is the append-only copy of the persisted event log. It is only ever
+	// appended to, never derived, so it cannot disagree with the transcript; the
+	// view is projected from it on demand.
+	log []transcript.Event
+	// logLoaded is false until the persisted transcript has been read.
 	// A nil recorder means there is nothing to load.
-	loaded bool
+	logLoaded bool
 
 	tsRecorder transcript.Recorder
 
@@ -109,8 +110,8 @@ func WithTools(ts Toolset) Option {
 }
 
 // WithTranscriptRecorder installs the persistent transcript recorder. A nil
-// recorder disables transcript writes and leaves the in-memory history as the
-// only record.
+// recorder disables transcript writes and leaves the in-memory log as the only
+// record.
 func WithTranscriptRecorder(r transcript.Recorder) Option {
 	return func(a *Agent) { a.tsRecorder = r }
 }
@@ -127,7 +128,7 @@ func New(streamer llm.Streamer, opts ...Option) *Agent {
 	}
 	a.events = make(chan schema.Event, 32)
 	if a.tsRecorder == nil {
-		a.loaded = true
+		a.logLoaded = true
 	}
 	return a
 }
@@ -151,7 +152,7 @@ func (a *Agent) Turn(ctx context.Context, input string) (Turn, error) {
 		turnUsage llm.TokenUsage
 	)
 
-	if err := a.loadEvents(); err != nil {
+	if err := a.loadLog(); err != nil {
 		return a.closeTurn(ctx, err, turnUsage, turn, false)
 	}
 	if err := a.record(transcript.TurnStart{Timestamp: startTime}); err != nil {
@@ -178,7 +179,7 @@ func (a *Agent) Turn(ctx context.Context, input string) (Turn, error) {
 			)
 		}
 
-		// The previous step is closed, so the history is still whole tool-call
+		// The previous step is closed, so the view still holds whole tool-call
 		// groups here.
 		if step > 0 {
 			if err := a.maybeCompact(ctx, true); err != nil {
@@ -193,14 +194,14 @@ func (a *Agent) Turn(ctx context.Context, input string) (Turn, error) {
 			return a.closeTurn(ctx, err, turnUsage, turn, false)
 		}
 
-		view, err := a.view()
+		v, err := a.project()
 		if err != nil {
 			return a.closeTurn(ctx, err, turnUsage, turn, false)
 		}
 
 		req := llm.Request{
 			Model:           a.model,
-			Messages:        view.Messages(),
+			Messages:        v.messages(),
 			SystemPrompt:    a.systemPrompt,
 			Temperature:     a.temperature,
 			MaxOutputTokens: a.maxOutputTokens,
@@ -334,7 +335,7 @@ func (a *Agent) closeTurn(
 
 // record appends one event to the transcript and to the in-memory copy of the
 // log. Because it never derives anything, the copy cannot drift from the file:
-// the request history is projected from it when it is needed.
+// the view is projected from it when it is needed.
 func (a *Agent) record(ev transcript.Event) error {
 	if a.tsRecorder != nil {
 		sequenced, err := a.tsRecorder.Append(ev)
@@ -345,28 +346,28 @@ func (a *Agent) record(ev transcript.Event) error {
 		// and replay must agree on them.
 		ev = sequenced
 	}
-	a.recorded = append(a.recorded, ev)
+	a.log = append(a.log, ev)
 	return nil
 }
 
-// view projects the request history from the event log.
-func (a *Agent) view() (*historyProjection, error) {
-	v, err := Project(a.recorded)
+// project folds the event log into the view the next request is built from.
+func (a *Agent) project() (*view, error) {
+	v, err := project(a.log)
 	if err != nil {
 		return nil, fmt.Errorf("project transcript: %w", err)
 	}
 	return v, nil
 }
 
-// loadEvents reads the persisted transcript once, before the first turn. The
+// loadLog reads the persisted transcript once, before the first turn. The
 // log is only published after it projects cleanly, so a malformed transcript
 // cannot leave half of itself behind.
-func (a *Agent) loadEvents() error {
-	if a.loaded {
+func (a *Agent) loadLog() error {
+	if a.logLoaded {
 		return nil
 	}
 	if a.tsRecorder == nil {
-		a.loaded = true
+		a.logLoaded = true
 		return nil
 	}
 
@@ -374,12 +375,12 @@ func (a *Agent) loadEvents() error {
 	if err != nil {
 		return fmt.Errorf("read transcript: %w", err)
 	}
-	v, err := Project(events)
+	v, err := project(events)
 	if err != nil {
 		return fmt.Errorf("replay transcript: %w", err)
 	}
-	a.recorded = events
-	a.loaded = true
+	a.log = events
+	a.logLoaded = true
 	a.restoreUsage(events, v)
 	return nil
 }
@@ -387,7 +388,7 @@ func (a *Agent) loadEvents() error {
 // restoreUsage reads back what the session already spent, so a resumed session
 // does not report zero. Only request usage is persisted; tokens burned by a
 // discarded retry attempt are not.
-func (a *Agent) restoreUsage(events []transcript.Event, v *historyProjection) {
+func (a *Agent) restoreUsage(events []transcript.Event, v *view) {
 	var (
 		total      llm.TokenUsage
 		lastPrompt int
@@ -411,13 +412,12 @@ func (a *Agent) restoreUsage(events []transcript.Event, v *historyProjection) {
 	a.totalUsage = total
 	if lastPrompt > 0 {
 		a.lastPromptTokens = lastPrompt
-		a.lastPromptEstimate = a.estimateRequest(v.Messages())
+		a.lastPromptEstimate = a.estimateRequest(v.messages())
 	}
 }
 
 // recordStep writes the reasoning, reasoning summary, and assistant output
-// produced by one model response before that response joins the in-memory
-// history.
+// produced by one model response before that response joins the log.
 func (a *Agent) recordStep(step Turn) error {
 	if reasoning := step.Reasoning(); reasoning != "" {
 		if err := a.record(transcript.AssistantReasoningMessage{Content: reasoning}); err != nil {
