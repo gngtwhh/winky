@@ -118,25 +118,6 @@ func (a *Agent) keepBudget() int {
 	return budget
 }
 
-// estimateContext estimates the next prompt size from the last exact provider
-// count plus the change the local estimator has seen since then, so the system
-// prompt and tool schemas cancel out.
-func (a *Agent) estimateContext() (int, error) {
-	v, err := a.project()
-	if err != nil {
-		return 0, err
-	}
-	est := a.estimateRequest(v.messages())
-	if a.lastPromptTokens <= 0 {
-		return est, nil
-	}
-	est = a.lastPromptTokens + est - a.lastPromptEstimate
-	if est < 0 {
-		return 0, nil
-	}
-	return est, nil
-}
-
 func (a *Agent) estimateRequest(msgs []llm.Message) int {
 	return 8 + estimateMessages(msgs) + estimateText(a.systemPrompt) + a.toolTokens
 }
@@ -152,16 +133,17 @@ func (a *Agent) maybeCompact(ctx context.Context, hard bool) error {
 	if !ok {
 		return nil
 	}
-	before, err := a.estimateContext()
+	v, s, err := a.derive()
 	if err != nil {
 		return err
 	}
+	before := a.estimateContext(v, s)
 	if before < limit {
 		return nil
 	}
 	a.compactionsThisTurn++
 
-	plan, ok, err := a.planCompaction(a.keepBudget())
+	plan, ok, err := a.planCompaction(v, a.keepBudget())
 	if err != nil {
 		return err
 	}
@@ -176,7 +158,6 @@ func (a *Agent) maybeCompact(ctx context.Context, hard bool) error {
 		}
 		return err
 	}
-	a.totalUsage = a.totalUsage.Add(usage)
 
 	kind := "auto_turn"
 	if hard {
@@ -202,19 +183,15 @@ func (a *Agent) Compact(ctx context.Context) (bool, error) {
 		return false, err
 	}
 
-	budget, err := a.manualKeepBudget()
+	v, s, err := a.derive()
 	if err != nil {
 		return false, err
 	}
-	plan, ok, err := a.planCompaction(budget)
+	plan, ok, err := a.planCompaction(v, a.manualKeepBudget(v, s))
 	if err != nil || !ok {
 		return false, err
 	}
-
-	before, err := a.estimateContext()
-	if err != nil {
-		return false, err
-	}
+	before := a.estimateContext(v, s)
 	summary, usage, err := a.summarize(ctx, plan.replaced)
 	if err != nil {
 		if cerr := ctx.Err(); cerr != nil {
@@ -222,8 +199,6 @@ func (a *Agent) Compact(ctx context.Context) (bool, error) {
 		}
 		return false, err
 	}
-	a.totalUsage = a.totalUsage.Add(usage)
-
 	if err := a.recordCompaction(plan, before, summary, "manual", usage); err != nil {
 		return false, err
 	}
@@ -233,16 +208,12 @@ func (a *Agent) Compact(ctx context.Context) (bool, error) {
 // manualKeepBudget is the tail a manual compaction keeps: a quarter of the
 // current context, so the command actually shrinks it instead of leaving almost
 // everything in place.
-func (a *Agent) manualKeepBudget() (int, error) {
-	est, err := a.estimateContext()
-	if err != nil {
-		return 0, err
-	}
-	budget := est / 4
+func (a *Agent) manualKeepBudget(v *view, s stats) int {
+	budget := a.estimateContext(v, s) / 4
 	if budget < minKeepTokens {
 		budget = minKeepTokens
 	}
-	return budget, nil
+	return budget
 }
 
 // recordCompaction persists one compaction event and reports the new size.
@@ -285,11 +256,7 @@ type compactionPlan struct {
 
 // planCompaction chooses how much to replace, preferring whole turns and
 // falling back to step boundaries when one turn alone is too large.
-func (a *Agent) planCompaction(keepBudget int) (compactionPlan, bool, error) {
-	v, err := a.project()
-	if err != nil {
-		return compactionPlan{}, false, err
-	}
+func (a *Agent) planCompaction(v *view, keepBudget int) (compactionPlan, bool, error) {
 	entries, turns, steps := v.parts()
 	if len(entries) < 2 || entries[0].seq <= 0 || keepBudget <= 0 {
 		return compactionPlan{}, false, nil

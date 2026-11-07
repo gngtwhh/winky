@@ -21,3 +21,6 @@ go.work.sum
 .DS_Store
 
 .env
+
+# Local configuration (README asks for it to stay local)
+/config.json

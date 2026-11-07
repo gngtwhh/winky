@@ -30,12 +30,19 @@ func (r *memRecorder) Subscribe() <-chan transcript.Event { return nil }
 // recordTurn appends one completed turn with a large user message.
 func recordTurn(t *testing.T, ag *Agent, size int) {
 	t.Helper()
+	recordTurnMeasured(t, ag, size, nil)
+}
+
+// recordTurnMeasured is recordTurn with a provider measurement on its single
+// request, so the next estimate is anchored on that number.
+func recordTurnMeasured(t *testing.T, ag *Agent, size int, usage *transcript.Usage) {
+	t.Helper()
 	events := []transcript.Event{
 		transcript.TurnStart{},
 		transcript.UserMessage{Content: strings.Repeat("x", size)},
 		transcript.StepStart{},
 		transcript.AssistantOutputMessage{Content: "ok"},
-		transcript.StepEnd{},
+		transcript.StepEnd{Usage: usage},
 		transcript.TurnEnd{},
 	}
 	for _, ev := range events {
@@ -60,12 +67,9 @@ func TestCompactionReplayMatchesLive(t *testing.T) {
 	)
 
 	recordTurn(t, ag, 4000)
-	recordTurn(t, ag, 4000)
-
-	// Pretend the provider measured the last request: the estimate is anchored
-	// on that number, so this is what pushes the context over the limit.
-	ag.lastPromptEstimate = ag.estimateRequest(mustView(t, ag).messages())
-	ag.lastPromptTokens = 2600
+	// The provider measured the last request: the estimate is anchored on that
+	// number, so this is what pushes the context over the limit.
+	recordTurnMeasured(t, ag, 4000, &transcript.Usage{PromptTokens: 2600, TotalTokens: 2800})
 
 	if err := ag.maybeCompact(context.Background(), false); err != nil {
 		t.Fatalf("maybeCompact: %v", err)
@@ -133,11 +137,11 @@ func TestEstimateContextGrowsWithView(t *testing.T) {
 // mustEstimate reports the current context estimate for assertions.
 func mustEstimate(t *testing.T, a *Agent) int {
 	t.Helper()
-	n, err := a.estimateContext()
+	v, s, err := a.derive()
 	if err != nil {
-		t.Fatalf("estimateContext: %v", err)
+		t.Fatalf("derive: %v", err)
 	}
-	return n
+	return a.estimateContext(v, s)
 }
 
 // Manual compaction runs below the automatic thresholds, and reports a no-op
@@ -208,7 +212,8 @@ func TestCompactionCutsAtStepBoundary(t *testing.T) {
 		transcript.StepEnd{},
 		transcript.StepStart{},
 		transcript.AssistantOutputMessage{Content: "done"},
-		transcript.StepEnd{},
+		// The hard limit is ~1725 for this window, so a measured 1800 crosses it.
+		transcript.StepEnd{Usage: &transcript.Usage{PromptTokens: 1800, TotalTokens: 1900}},
 		transcript.TurnEnd{},
 	}
 	for _, ev := range events {
@@ -216,9 +221,6 @@ func TestCompactionCutsAtStepBoundary(t *testing.T) {
 			t.Fatalf("record %s: %v", ev.Type(), err)
 		}
 	}
-
-	ag.lastPromptEstimate = ag.estimateRequest(mustView(t, ag).messages())
-	ag.lastPromptTokens = 1800 // the hard limit is ~1725 for this window
 
 	if err := ag.maybeCompact(context.Background(), true); err != nil {
 		t.Fatalf("maybeCompact: %v", err)

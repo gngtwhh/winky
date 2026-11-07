@@ -54,7 +54,6 @@ type Agent struct {
 	tools           Toolset
 	events          chan schema.Event
 
-	totalUsage llm.TokenUsage
 	// log is the append-only copy of the persisted event log. It is only ever
 	// appended to, never derived, so it cannot disagree with the transcript; the
 	// view is projected from it on demand.
@@ -69,15 +68,11 @@ type Agent struct {
 	// belongs to the agent.
 	busy sync.Mutex
 
-	// Context compaction.
-	compact       CompactionOptions
-	contextWindow int
-	toolTokens    int
-
-	// Prompt-size anchors: the provider's last count and the local estimate of
-	// that same request. Only the difference since then is estimated later.
-	lastPromptTokens    int
-	lastPromptEstimate  int
+	// Context compaction. Everything the next request needs is folded out of the
+	// log by derive; only the per-turn compaction budget survives across calls.
+	compact             CompactionOptions
+	contextWindow       int
+	toolTokens          int
 	compactionsThisTurn int
 }
 
@@ -210,13 +205,12 @@ func (a *Agent) Turn(ctx context.Context, input string) (Turn, error) {
 			req.Tools = a.tools.Specs()
 		}
 
-		resp, usage, retried, draft, err := a.stream(ctx, req)
-		turnUsage = turnUsage.Add(retried).Add(usage)
+		resp, usage, draft, err := a.stream(ctx, req)
+		turnUsage = turnUsage.Add(usage)
 		if usage.PromptTokens > 0 {
 			// The prompt-token count is the exact size of the request just
-			// sent, so it is the best available measure of context usage.
-			a.lastPromptTokens = usage.PromptTokens
-			a.lastPromptEstimate = a.estimateRequest(req.Messages)
+			// sent, so it is the best available measure of context usage. It
+			// also anchors the next estimate, through the StepEnd below.
 			a.emit(schema.ContextUsage{Tokens: usage.PromptTokens})
 		}
 		if err != nil {
@@ -278,8 +272,7 @@ func (a *Agent) Turn(ctx context.Context, input string) (Turn, error) {
 		return a.closeTurn(ctx, err, turnUsage, turn, false)
 	}
 
-	a.totalUsage = a.totalUsage.Add(turnUsage)
-	a.emit(schema.TurnEnd{Turn: turn, Usage: turnUsage, TotalUsage: a.totalUsage})
+	a.emit(schema.TurnEnd{Turn: turn, Usage: turnUsage, TotalUsage: a.total()})
 	return turn, nil
 }
 
@@ -312,13 +305,13 @@ func (a *Agent) closeTurn(
 	if stepOpen {
 		_ = a.record(transcript.StepEnd{Timestamp: time.Now(), Usage: usagePtr(usage)})
 	}
-	a.totalUsage = a.totalUsage.Add(usage)
+	total := a.total()
 
 	if ctx.Err() != nil {
 		reason := ctx.Err().Error()
 		_ = a.record(transcript.TurnAborted{Timestamp: time.Now(), Reason: reason})
 		a.emit(schema.TurnAborted{
-			Turn: turn, Usage: usage, TotalUsage: a.totalUsage, Reason: reason,
+			Turn: turn, Usage: usage, TotalUsage: total, Reason: reason,
 		})
 		return turn, fmt.Errorf("%w: %v", ErrAborted, reason)
 	}
@@ -328,7 +321,7 @@ func (a *Agent) closeTurn(
 	}
 	_ = a.record(transcript.TurnFailed{Timestamp: time.Now(), Error: err.Error()})
 	a.emit(schema.TurnFailed{
-		Err: err, Turn: turn, Usage: usage, TotalUsage: a.totalUsage,
+		Err: err, Turn: turn, Usage: usage, TotalUsage: total,
 	})
 	return turn, err
 }
@@ -352,16 +345,16 @@ func (a *Agent) record(ev transcript.Event) error {
 
 // project folds the event log into the view the next request is built from.
 func (a *Agent) project() (*view, error) {
-	v, err := project(a.log)
+	v, _, err := a.derive()
 	if err != nil {
 		return nil, fmt.Errorf("project transcript: %w", err)
 	}
 	return v, nil
 }
 
-// loadLog reads the persisted transcript once, before the first turn. The
-// log is only published after it projects cleanly, so a malformed transcript
-// cannot leave half of itself behind.
+// loadLog reads the persisted transcript once, before the first turn. The log is
+// only published after it projects cleanly, so a malformed transcript cannot
+// leave half of itself behind.
 func (a *Agent) loadLog() error {
 	if a.logLoaded {
 		return nil
@@ -375,45 +368,12 @@ func (a *Agent) loadLog() error {
 	if err != nil {
 		return fmt.Errorf("read transcript: %w", err)
 	}
-	v, err := project(events)
-	if err != nil {
+	if _, err := project(events); err != nil {
 		return fmt.Errorf("replay transcript: %w", err)
 	}
 	a.log = events
 	a.logLoaded = true
-	a.restoreUsage(events, v)
 	return nil
-}
-
-// restoreUsage reads back what the session already spent, so a resumed session
-// does not report zero. Only request usage is persisted; tokens burned by a
-// discarded retry attempt are not.
-func (a *Agent) restoreUsage(events []transcript.Event, v *view) {
-	var (
-		total      llm.TokenUsage
-		lastPrompt int
-	)
-	for _, ev := range events {
-		switch e := ev.(type) {
-		case transcript.StepEnd:
-			if e.Usage != nil {
-				total = total.Add(llmUsage(*e.Usage))
-				if e.Usage.PromptTokens > 0 {
-					lastPrompt = e.Usage.PromptTokens
-				}
-			}
-		case transcript.CompactionSummary:
-			if e.Usage != nil {
-				total = total.Add(llmUsage(*e.Usage))
-			}
-		}
-	}
-
-	a.totalUsage = total
-	if lastPrompt > 0 {
-		a.lastPromptTokens = lastPrompt
-		a.lastPromptEstimate = a.estimateRequest(v.messages())
-	}
 }
 
 // recordStep writes the reasoning, reasoning summary, and assistant output
@@ -454,26 +414,24 @@ func (a *Agent) recordStep(step Turn) error {
 // attempt that already emitted output is never retried: the same step would be
 // asked twice and the user already saw the partial answer.
 //
-// The usage of the last attempt is returned separately from the usage spent on
-// the failed ones: only the former describes the size of the request, which is
-// what context accounting needs.
-func (a *Agent) stream(ctx context.Context, req llm.Request) (*llm.Response, llm.TokenUsage, llm.TokenUsage, Turn, error) {
-	var retried llm.TokenUsage
+// The usage of a discarded attempt is dropped with it. It never reaches the
+// transcript, so counting it live would make a resumed session report a
+// different total than the one it showed before it exited.
+func (a *Agent) stream(ctx context.Context, req llm.Request) (*llm.Response, llm.TokenUsage, Turn, error) {
 	for attempt := 0; ; attempt++ {
 		resp, usage, draft, produced, err := a.streamOnce(ctx, req)
 		if err == nil {
-			return resp, usage, retried, Turn{}, nil
+			return resp, usage, Turn{}, nil
 		}
 		if produced || attempt >= maxStreamRetries || !llm.Retryable(err) || ctx.Err() != nil {
-			return nil, usage, retried, draft, err
+			return nil, usage, draft, err
 		}
-		retried = retried.Add(usage)
 
 		delay := retryBaseDelay << attempt
 		a.emit(schema.Retrying{Attempt: attempt + 1, Max: maxStreamRetries, Delay: delay, Err: err})
 		select {
 		case <-ctx.Done():
-			return nil, usage, retried, draft, err
+			return nil, usage, draft, err
 		case <-time.After(delay):
 		}
 	}

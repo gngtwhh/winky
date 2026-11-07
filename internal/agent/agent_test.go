@@ -117,8 +117,8 @@ func TestTurnEndCarriesUsage(t *testing.T) {
 	if end.TotalUsage.TotalTokens != 62 {
 		t.Fatalf("TurnEnd totalUsage = %+v, want total 62", end.TotalUsage)
 	}
-	if ag.totalUsage.TotalTokens != 62 {
-		t.Fatalf("agent total usage = %+v, want 62", ag.totalUsage)
+	if got := mustStats(t, ag).total.TotalTokens; got != 62 {
+		t.Fatalf("agent total usage = %d, want 62", got)
 	}
 }
 
@@ -150,8 +150,8 @@ func TestTurnFailedCarriesUsage(t *testing.T) {
 	if failed.Usage.TotalTokens != 30 {
 		t.Fatalf("TurnFailed usage = %+v, want total 30", failed.Usage)
 	}
-	if ag.totalUsage.TotalTokens != 30 {
-		t.Fatalf("agent total usage = %+v, want 30", ag.totalUsage)
+	if got := mustStats(t, ag).total.TotalTokens; got != 30 {
+		t.Fatalf("agent total usage = %d, want 30", got)
 	}
 }
 

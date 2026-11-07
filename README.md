@@ -7,12 +7,12 @@ The project is early-stage and focuses on the agent loop, tool permissions, and 
 ## Features
 
 - Streaming model output, reasoning, and tool calls
-- Automatic retry with backoff when a model request fails transiently (rate limit, 5xx, network drop)
+- Automatic retry with backoff when a model request fails transiently (rate limit, 5xx, network drop); a discarded attempt is not billed
 - File read, write, edit, delete, and directory operations
 - Shell commands, web search, and web fetch
 - Permission levels with per-action approval
 - JSONL session transcripts stored locally
-- Request history projected from the transcript
+- The model-facing view is projected from the transcript on every request
 - Automatic context compaction with a summarized handover
 - Model catalog and OpenAI Responses-compatible client
 - Optional system prompt and token/context usage display
@@ -166,7 +166,7 @@ winky -r
 ```
 
 The chosen session continues where it stopped: `transcript.jsonl` is replayed
-into the request history and into the TUI scrollback, and new events keep
+into the request view and into the TUI scrollback, and new events keep
 appending with continuing sequence numbers. `meta.json` keeps the cwd, provider,
 and model recorded when the session was created; only `updated_at` is refreshed
 on exit.
@@ -226,7 +226,7 @@ kept verbatim.
 
 ```text
 cmd/tui/                    entry point and agent wiring
-internal/agent/             agent loop, history projection, and context compaction
+internal/agent/             agent loop, view projection, and context compaction
 internal/llm/               request/response types and OpenAI Responses client
 internal/llm/api/           provider adapters
 internal/tool/              filesystem, shell, web tools and permission policy
@@ -249,7 +249,7 @@ go test ./...
 
 - Only the `openai-responses` protocol is supported; other protocols in `catalog.json` are not wired up.
 - Only new sessions are supported, with no resume.
-- Compaction keeps the full history on disk: it changes the request, not `transcript.jsonl`.
+- Compaction keeps the whole conversation on disk: it changes what is sent, not `transcript.jsonl`.
 - Compaction only cuts at turn or step boundaries, so a request that is still too large after compacting fails with an error instead of dropping context silently.
 - The transcript writer assumes a single process; there is no file locking.
 - The project is early-stage, so APIs and behavior may change.

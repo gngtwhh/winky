@@ -31,6 +31,16 @@ func mustProject(t *testing.T, events []transcript.Event) *view {
 	return v
 }
 
+// mustStats folds an agent's log for assertions.
+func mustStats(t *testing.T, a *Agent) stats {
+	t.Helper()
+	_, s, err := a.derive()
+	if err != nil {
+		t.Fatalf("derive: %v", err)
+	}
+	return s
+}
+
 // mustView projects an agent's log for assertions.
 func mustView(t *testing.T, a *Agent) *view {
 	t.Helper()
