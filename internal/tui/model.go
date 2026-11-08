@@ -47,12 +47,12 @@ type keyMap struct {
 
 func defaultKeyMap() keyMap {
 	return keyMap{
-		Send:       key.NewBinding(key.WithKeys("enter"), key.WithHelp("enter", "发送")),
-		Cancel:     key.NewBinding(key.WithKeys("esc"), key.WithHelp("esc", "取消/清空")),
-		Quit:       key.NewBinding(key.WithKeys("ctrl+c"), key.WithHelp("ctrl+c", "退出")),
-		ScrollUp:   key.NewBinding(key.WithKeys("pgup"), key.WithHelp("pgup", "上翻")),
-		ScrollDown: key.NewBinding(key.WithKeys("pgdown"), key.WithHelp("pgdn", "下翻")),
-		ToggleAll:  key.NewBinding(key.WithKeys("ctrl+t"), key.WithHelp("ctrl+t", "展开/折叠全部思考")),
+		Send:       key.NewBinding(key.WithKeys("enter"), key.WithHelp("enter", "send")),
+		Cancel:     key.NewBinding(key.WithKeys("esc"), key.WithHelp("esc", "cancel or clear")),
+		Quit:       key.NewBinding(key.WithKeys("ctrl+c"), key.WithHelp("ctrl+c", "quit")),
+		ScrollUp:   key.NewBinding(key.WithKeys("pgup"), key.WithHelp("pgup", "scroll up")),
+		ScrollDown: key.NewBinding(key.WithKeys("pgdown"), key.WithHelp("pgdn", "scroll down")),
+		ToggleAll:  key.NewBinding(key.WithKeys("ctrl+t"), key.WithHelp("ctrl+t", "expand or collapse reasoning")),
 	}
 }
 
@@ -83,7 +83,7 @@ type model struct {
 	sp    spinner.Model  // shown while a turn is streaming
 
 	// Session view state.
-	history         []card
+	cards           []card
 	hints           []hint // clickable lines (toggling a collapsible card)
 	follow          bool   // autoscroll while streaming
 	dirty           bool   // deltas pending a coalesced rebuild
@@ -91,8 +91,8 @@ type model struct {
 	streaming       bool
 	cancelling      bool             // esc asked for a cancel; waiting for TurnAborted
 	cancelled       map[int]bool     // turn ids cancelled by the user
-	liveBlocks      map[blockKey]int // blockKey -> history index of the live card
-	turnStartIdx    int              // history index where this turn's cards begin
+	liveBlocks      map[blockKey]int // blockKey -> card index of the live card
+	turnStartIdx    int              // card index where this turn's cards begin
 	expandReasoning bool
 
 	// Token usage: current turn and session total (zero TotalTokens = none).

@@ -15,6 +15,7 @@ import (
 
 	"winky/internal/agent"
 	"winky/internal/llm"
+	"winky/internal/tool"
 )
 
 // fakeAgent is a scripted Agent: Turn only records calls, while Events returns a
@@ -121,12 +122,12 @@ func turnRound(t *testing.T, m model) model {
 
 func cardAt(t *testing.T, m model, kind cardKind) card {
 	t.Helper()
-	for _, c := range m.history {
+	for _, c := range m.cards {
 		if c.Kind == kind {
 			return c
 		}
 	}
-	t.Fatalf("no card of kind %v in %d cards", kind, len(m.history))
+	t.Fatalf("no card of kind %v in %d cards", kind, len(m.cards))
 	return card{}
 }
 
@@ -175,8 +176,8 @@ func TestBlocksStreamAndReconcile(t *testing.T) {
 	m := newTestModel(t, ag)
 
 	m = feed(t, m, AgentEvent{Event: schema.TurnStart{Timestamp: time.Now()}})
-	if len(m.history) != 0 {
-		t.Fatalf("no cards should be created eagerly, got %d", len(m.history))
+	if len(m.cards) != 0 {
+		t.Fatalf("no cards should be created eagerly, got %d", len(m.cards))
 	}
 
 	// Same-ID reasoning deltas append to one live block.
@@ -264,14 +265,14 @@ func TestCancelDiscardsStaleEvents(t *testing.T) {
 		t.Fatal("esc did not clear the turn cancel function")
 	}
 
-	before := len(m.history)
+	before := len(m.cards)
 	m = feed(t, m, AgentEvent{Event: schema.OutputDelta{Text: "late"}})
 
 	next, _ = m.Update(turnResult{TurnID: staleTurn, Result: agent.Turn{}, Err: errors.New("boom")})
 	m = next.(model)
 
-	if len(m.history) != before {
-		t.Fatalf("history grew by %d cards after cancel, want 0", len(m.history)-before)
+	if len(m.cards) != before {
+		t.Fatalf("history grew by %d cards after cancel, want 0", len(m.cards)-before)
 	}
 	if m.err != nil {
 		t.Fatalf("error = %v, want nil for a discarded result", m.err)
@@ -708,5 +709,62 @@ func TestPermissionPromptKeys(t *testing.T) {
 	}
 	if m.cancelling {
 		t.Fatal("n must not cancel the turn")
+	}
+}
+
+// /? lists every command, so the list cannot drift from what is dispatchable.
+func TestHelpListsEveryCommand(t *testing.T) {
+	for _, name := range []string{"/?", "/help"} {
+		m := newTestModel(t, newFakeAgent())
+
+		m.input.SetValue(name)
+		next, _ := m.Update(keyPress(tea.KeyEnter, 0))
+		m = next.(model)
+
+		hint := m.cards[len(m.cards)-1]
+		if hint.Kind != cardNotice {
+			t.Fatalf("%s produced a %v card, want a notice", name, hint.Kind)
+		}
+		for _, c := range commands() {
+			for _, n := range c.names {
+				if !strings.Contains(hint.Text, n) {
+					t.Fatalf("%s listing is missing %s:\n%s", name, n, hint.Text)
+				}
+			}
+		}
+	}
+}
+
+// Any alias in the table dispatches to the same command.
+func TestCommandAliases(t *testing.T) {
+	m := newTestModel(t, newFakeAgent())
+	m.policy = tool.NewPolicy(tool.ReadOnly)
+
+	m.input.SetValue("/write")
+	next, _ := m.Update(keyPress(tea.KeyEnter, 0))
+	m = next.(model)
+
+	if m.status != "permission: workspace" {
+		t.Fatalf("status = %q, want the workspace permission", m.status)
+	}
+}
+
+// A trailing argument is ignored, and an unknown command points at the listing.
+func TestUnknownCommandPointsAtHelp(t *testing.T) {
+	m := newTestModel(t, newFakeAgent())
+	m.policy = tool.NewPolicy(tool.ReadOnly)
+
+	m.input.SetValue("/full because I said so")
+	next, _ := m.Update(keyPress(tea.KeyEnter, 0))
+	m = next.(model)
+	if m.status != "permission: full" {
+		t.Fatalf("status = %q, want the full permission", m.status)
+	}
+
+	m.input.SetValue("/nope")
+	next, _ = m.Update(keyPress(tea.KeyEnter, 0))
+	m = next.(model)
+	if !strings.Contains(m.status, "try /?") {
+		t.Fatalf("status = %q, want a pointer to /?", m.status)
 	}
 }

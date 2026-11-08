@@ -141,6 +141,7 @@ Available commands:
 | `/workspace` or `/write` | Workspace read/write mode |
 | `/full` | Full access, including outside paths, shell, and network |
 | `/compact` | Summarize old turns now, without waiting for the threshold |
+| `/?` or `/help` | List the supported commands |
 
 When an approval prompt appears:
 

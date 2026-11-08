@@ -13,7 +13,6 @@ import (
 	tea "charm.land/bubbletea/v2"
 
 	"winky/internal/llm"
-	"winky/internal/tool"
 )
 
 // errAgentNil guards against running without a configured agent.
@@ -184,6 +183,16 @@ func (m model) cancelTurn() (tea.Model, tea.Cmd) {
 	return m, nil
 }
 
+// markCancelled asks the agent to abort the current turn. The view stays busy
+// until TurnAborted arrives; late deltas are discarded.
+func (m *model) markCancelled() {
+	if m.cancelled == nil {
+		m.cancelled = make(map[int]bool)
+	}
+	m.cancelled[m.turn] = true
+	m.cancelling = true
+}
+
 // handleMouse routes clicks to clickable reasoning labels and everything else to
 // the viewport (wheel scrolling, drag selection).
 func (m model) handleMouse(msg tea.Msg) (tea.Model, tea.Cmd) {
@@ -226,7 +235,7 @@ func (m *model) handleEvent(e schema.Event) tea.Cmd {
 		// TurnEnd/TurnFailed; fold them so two live blocks cannot coexist.
 		m.freezeLiveCards()
 		m.liveBlocks = make(map[blockKey]int)
-		m.turnStartIdx = len(m.history)
+		m.turnStartIdx = len(m.cards)
 		return tickCmd(m.turn)
 
 	case schema.ReasoningDelta:
@@ -252,7 +261,7 @@ func (m *model) handleEvent(e schema.Event) tea.Cmd {
 			return nil
 		}
 		idx := m.ensureBlock(blockKey{kind: cardTool, id: ev.CallID})
-		m.history[idx].Title = ev.Name
+		m.cards[idx].Title = ev.Name
 		m.dirty = true
 
 	case schema.ToolCallArgsDelta:
@@ -266,7 +275,7 @@ func (m *model) handleEvent(e schema.Event) tea.Cmd {
 			return nil
 		}
 		idx := m.ensureBlock(blockKey{kind: cardTool, id: ev.CallID})
-		m.history[idx].Text = ev.Arguments
+		m.cards[idx].Text = ev.Arguments
 		m.dirty = true
 
 	case schema.ToolResult:
@@ -274,9 +283,9 @@ func (m *model) handleEvent(e schema.Event) tea.Cmd {
 			return nil
 		}
 		idx := m.ensureBlock(blockKey{kind: cardTool, id: ev.CallID})
-		m.history[idx].Output = ev.Output
-		m.history[idx].IsError = ev.IsError
-		m.history[idx].Duration = ev.Duration
+		m.cards[idx].Output = ev.Output
+		m.cards[idx].IsError = ev.IsError
+		m.cards[idx].Duration = ev.Duration
 		m.dirty = true
 
 	case schema.ContextUsage:
@@ -356,7 +365,7 @@ func (m *model) handleEvent(e schema.Event) tea.Cmd {
 func (m *model) appendDelta(key blockKey, text string) {
 	m.retry = ""
 	idx := m.ensureBlock(key)
-	m.history[idx].Text += text
+	m.cards[idx].Text += text
 	m.dirty = true
 }
 
@@ -369,22 +378,22 @@ func (m *model) ensureBlock(key blockKey) int {
 	if key.kind.collapsible() {
 		c.Expanded = true // stream inline
 	}
-	m.history = append(m.history, c)
-	m.liveBlocks[key] = len(m.history) - 1
+	m.cards = append(m.cards, c)
+	m.liveBlocks[key] = len(m.cards) - 1
 	m.dirty = true
-	return len(m.history) - 1
+	return len(m.cards) - 1
 }
 
 func (m *model) applyTurn(turn schema.Turn) {
 	// Notices such as context-compacted are not turn blocks; keep them.
 	var notices []card
-	for _, c := range m.history[m.turnStartIdx:] {
+	for _, c := range m.cards[m.turnStartIdx:] {
 		if c.Kind == cardNotice && !c.Live {
 			notices = append(notices, c)
 		}
 	}
-	m.history = m.history[:m.turnStartIdx]
-	m.history = append(m.history, notices...)
+	m.cards = m.cards[:m.turnStartIdx]
+	m.cards = append(m.cards, notices...)
 	results := make(map[string]schema.ToolResult, len(turn.ToolResults))
 	for _, r := range turn.ToolResults {
 		results[r.CallID] = r
@@ -398,7 +407,7 @@ func (m *model) applyTurn(turn schema.Turn) {
 				c.Duration = r.Duration
 			}
 		}
-		m.history = append(m.history, c)
+		m.cards = append(m.cards, c)
 	}
 	m.liveBlocks = nil
 }
@@ -431,39 +440,6 @@ func cardKindFor(k schema.BlockKind) cardKind {
 	default:
 		return cardAssistant
 	}
-}
-
-// applyCommand handles a "/" input: /compact, /readonly, /workspace (or /write),
-// /full.
-func (m model) applyCommand(text string) (tea.Model, tea.Cmd) {
-	m.input.Reset()
-	if strings.TrimSpace(text) == "/compact" {
-		return m.startCompact()
-	}
-	perm, ok := parsePerm(text)
-	if !ok {
-		m.status = "unknown command: " + text
-		return m, nil
-	}
-	if m.policy == nil {
-		m.status = "no tool policy attached"
-		return m, nil
-	}
-	m.policy.Set(perm)
-	m.status = "permission: " + perm.String()
-	return m, nil
-}
-
-func parsePerm(s string) (tool.Permission, bool) {
-	switch strings.TrimSpace(s) {
-	case "/readonly":
-		return tool.ReadOnly, true
-	case "/workspace", "/write":
-		return tool.WorkspaceWrite, true
-	case "/full":
-		return tool.FullAccess, true
-	}
-	return tool.WorkspaceWrite, false
 }
 
 // handleTurnResult reconciles the command's return value with the event stream.
@@ -514,50 +490,6 @@ func (m model) handleTurnResult(res turnResult) (tea.Model, tea.Cmd) {
 	return m, nil
 }
 
-// startCompact runs a manual compaction in the background. The visible result
-// arrives through ContextCompacted; this only tracks completion and failure.
-func (m model) startCompact() (tea.Model, tea.Cmd) {
-	if m.ag == nil {
-		m.status = "agent is not configured"
-		return m, nil
-	}
-	if m.streaming {
-		m.status = "wait for the current turn to finish"
-		return m, nil
-	}
-	if m.compactCanc != nil {
-		m.status = "already compacting"
-		return m, nil
-	}
-
-	ctx, cancel := context.WithCancel(m.tuiContext())
-	m.compactCanc = cancel
-	m.status = "compacting..."
-	m.err = nil
-	return m, doCompact(ctx, m.ag)
-}
-
-// handleCompactResult reports why a manual compaction did or did not run. The
-// size change itself is already shown by the ContextCompacted event.
-func (m model) handleCompactResult(res compactResult) (tea.Model, tea.Cmd) {
-	m.compactCanc = nil
-	switch {
-	case res.Err == nil && res.Changed:
-		m.status = ""
-	case res.Err == nil:
-		m.status = "nothing to compact"
-	case errors.Is(res.Err, context.Canceled):
-		m.status = "compaction cancelled"
-	default:
-		m.err = res.Err
-		m.status = ""
-		m.appendCard(card{Kind: cardError, Text: res.Err.Error(), At: time.Now()})
-		return m, nil // appendCard rebuilt the view
-	}
-	m.rebuild()
-	return m, nil
-}
-
 func (m model) submit() (tea.Model, tea.Cmd) {
 	text := strings.TrimSpace(m.input.Value())
 	if text == "" {
@@ -588,7 +520,7 @@ func (m model) submit() (tea.Model, tea.Cmd) {
 	m.appendCard(card{Kind: cardUser, Text: text, At: time.Now()})
 	// Set here as well as on TurnStart: applyTurn must stay correct if the turn
 	// is cancelled before its TurnStart arrives.
-	m.turnStartIdx = len(m.history)
+	m.turnStartIdx = len(m.cards)
 	m.input.Reset()
 	m.liveBlocks = nil
 	m.usage = llm.TokenUsage{}

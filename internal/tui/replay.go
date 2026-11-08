@@ -24,43 +24,43 @@ func (m *model) replayCards(events []transcript.Event) {
 	for _, ev := range events {
 		switch e := ev.(type) {
 		case transcript.UserMessage:
-			m.history = append(m.history, card{Kind: cardUser, Text: e.Content})
+			m.cards = append(m.cards, card{Kind: cardUser, Text: e.Content})
 
 		case transcript.AssistantReasoningMessage:
-			m.history = append(m.history, card{
+			m.cards = append(m.cards, card{
 				Kind: cardReasoning, Text: e.Content, Expanded: m.expandReasoning,
 			})
 
 		case transcript.AssistantReasoningSummary:
-			m.history = append(m.history, card{
+			m.cards = append(m.cards, card{
 				Kind: cardSummary, Text: e.Content, Expanded: m.expandReasoning,
 			})
 
 		case transcript.AssistantOutputMessage:
 			if e.Content != "" {
-				m.history = append(m.history, card{Kind: cardAssistant, Text: e.Content})
+				m.cards = append(m.cards, card{Kind: cardAssistant, Text: e.Content})
 			}
 			for _, tc := range e.ToolCalls {
-				m.history = append(m.history, card{
+				m.cards = append(m.cards, card{
 					Kind: cardTool, ID: tc.CallID, Title: tc.Name, Text: tc.Arguments,
 				})
-				calls[tc.CallID] = len(m.history) - 1
+				calls[tc.CallID] = len(m.cards) - 1
 			}
 
 		case transcript.ToolResult:
 			if i, ok := calls[e.CallID]; ok {
-				m.history[i].Output = e.Output
-				m.history[i].IsError = e.Aborted
+				m.cards[i].Output = e.Output
+				m.cards[i].IsError = e.Aborted
 			}
 
 		case transcript.TurnAborted:
-			m.history = append(m.history, card{
+			m.cards = append(m.cards, card{
 				Kind: cardNotice,
 				Text: "request aborted",
 			})
 
 		case transcript.TurnFailed:
-			m.history = append(m.history, card{Kind: cardError, Text: e.Error})
+			m.cards = append(m.cards, card{Kind: cardError, Text: e.Error})
 
 		case transcript.StepEnd:
 			// Usage is persisted per request, so a resumed session shows what it
@@ -76,7 +76,7 @@ func (m *model) replayCards(events []transcript.Event) {
 			if e.Usage != nil {
 				m.totalUsage = m.totalUsage.Add(llmUsage(*e.Usage))
 			}
-			m.history = append(m.history, card{
+			m.cards = append(m.cards, card{
 				Kind: cardNotice,
 				Text: "context compacted · " + formatTokens(e.TokensBefore) + " → " + formatTokens(e.TokensAfter),
 			})
