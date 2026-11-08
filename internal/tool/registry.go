@@ -7,6 +7,7 @@ import (
 	"sort"
 	"strings"
 	"sync"
+	"time"
 
 	"winky/internal/llm"
 )
@@ -118,6 +119,19 @@ func (r *Registry) Specs() []llm.ToolSpec {
 	return out
 }
 
+// Deadline reports how long the tool that would handle this call allows it to
+// run. Zero means the tool declared nothing and the runner's own ceiling applies.
+func (r *Registry) Deadline(c Call) time.Duration {
+	t, ok := r.Lookup(c.Name)
+	if !ok {
+		return 0
+	}
+	if b, ok := t.(Budgeted); ok {
+		return b.Deadline(c)
+	}
+	return 0
+}
+
 // Sequential reports whether the named tool must run alone, in issue order.
 func (r *Registry) Sequential(name string) bool {
 	t, ok := r.Lookup(name)
@@ -156,11 +170,9 @@ func (r *Registry) Run(ctx context.Context, call Call) Result {
 	if err != nil {
 		res = Result{Output: "error: " + err.Error(), IsError: true}
 	}
-	// Relabel failed results only: a call that succeeded just before the cancel
-	// keeps its real output for the "continue" case.
-	if ctx.Err() != nil && res.IsError {
-		res.Aborted = true
-	}
+	// Aborted is deliberately left alone here: a cancelled context does not say
+	// why it was cancelled, and the runner is the one that knows whether it was
+	// the user or a spent budget.
 	res.Output = Truncate(res.Output, r.maxOutputBytes())
 	return res
 }

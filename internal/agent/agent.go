@@ -9,11 +9,11 @@ import (
 	"fmt"
 	"sync"
 	"time"
-	"winky/internal/schema"
-	"winky/internal/transcript"
 
 	"winky/internal/llm"
+	"winky/internal/schema"
 	"winky/internal/tool"
+	"winky/internal/transcript"
 )
 
 // maxSteps caps how many model requests one turn may make before giving up, so a
@@ -34,14 +34,6 @@ const (
 	// retryBaseDelay doubles after each failed attempt.
 	retryBaseDelay = 500 * time.Millisecond
 )
-
-// Toolset is the tool surface an Agent exposes to the model. *tool.Registry
-// satisfies it; tests can inject a scripted one.
-type Toolset interface {
-	Specs() []llm.ToolSpec
-	Run(ctx context.Context, call tool.Call) tool.Result
-	Sequential(name string) bool
-}
 
 // Agent keeps an LLM streamer, the event log its view is projected from, and
 // the tools it may run.
@@ -74,6 +66,8 @@ type Agent struct {
 	contextWindow       int
 	toolTokens          int
 	compactionsThisTurn int
+	// calls breaks a per-turn loop of identical tool calls.
+	calls callGuard
 }
 
 // Option configures an Agent.
@@ -162,6 +156,7 @@ func (a *Agent) Turn(ctx context.Context, input string) (Turn, error) {
 	}
 
 	a.compactionsThisTurn = 0
+	a.calls = callGuard{}
 	if err := a.maybeCompact(ctx, false); err != nil {
 		return a.closeTurn(ctx, err, turnUsage, turn, false)
 	}
@@ -514,85 +509,6 @@ func (a *Agent) streamOnce(
 		streamErr = fmt.Errorf("stream stopped: %s", stopReason)
 	}
 	return nil, usage, draft.Turn(), produced, streamErr
-}
-
-// runTools executes the calls of one step. Calls run concurrently unless any
-// tool requires sequential execution, in which case all run in issue order.
-//
-// A derived context cancels every running tool. On cancel no new call starts,
-// unstarted calls get aborted results, and we wait so results do not race.
-func (a *Agent) runTools(ctx context.Context, calls []tool.Call) []ToolResult {
-	results := make([]ToolResult, len(calls))
-	if a.tools == nil {
-		for i, c := range calls {
-			results[i] = ToolResult{CallID: c.ID, Name: c.Name, Output: "error: no tools are registered", IsError: true}
-		}
-		return results
-	}
-
-	toolCtx, cancel := context.WithCancel(ctx)
-	defer cancel()
-
-	aborted := func(c tool.Call) ToolResult {
-		return ToolResult{
-			CallID: c.ID, Name: c.Name, Output: transcript.AbortedToolResult,
-			IsError: true, Aborted: true,
-		}
-	}
-
-	sequential := false
-	for _, c := range calls {
-		if a.tools.Sequential(c.Name) {
-			sequential = true
-			break
-		}
-	}
-	if sequential {
-		for i, c := range calls {
-			if toolCtx.Err() != nil {
-				results[i] = aborted(c)
-				continue
-			}
-			results[i] = a.runOne(toolCtx, c)
-			if results[i].Aborted {
-				for j := i + 1; j < len(calls); j++ {
-					results[j] = aborted(calls[j])
-				}
-				break
-			}
-		}
-		return results
-	}
-
-	var wg sync.WaitGroup
-	for i, c := range calls {
-		if toolCtx.Err() != nil {
-			results[i] = aborted(c)
-			continue
-		}
-		wg.Add(1)
-		go func(i int, c tool.Call) {
-			defer wg.Done()
-			results[i] = a.runOne(toolCtx, c)
-		}(i, c)
-	}
-	wg.Wait()
-	return results
-}
-
-func (a *Agent) runOne(ctx context.Context, c tool.Call) ToolResult {
-	start := time.Now()
-	res := a.tools.Run(ctx, c)
-	out := ToolResult{
-		CallID: c.ID, Name: c.Name, Output: res.Output,
-		IsError: res.IsError, Duration: time.Since(start),
-	}
-	if res.Aborted {
-		out.Output = transcript.AbortedToolResult
-		out.IsError = true
-		out.Aborted = true
-	}
-	return out
 }
 
 // usagePtr converts provider usage into the stored form, or nil when the

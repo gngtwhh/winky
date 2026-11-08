@@ -9,6 +9,7 @@ import (
 	"net/url"
 	"regexp"
 	"strings"
+	"time"
 
 	"winky/internal/llm"
 )
@@ -16,7 +17,16 @@ import (
 const (
 	maxFetchBytes   = 1 << 20 // 1 MiB read per page
 	searchUserAgent = "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36"
+
+	// webTimeout bounds both the whole call and the client itself. A request to
+	// an address that never answers would otherwise hang the turn: the default
+	// http.Client has no timeout.
+	webTimeout = 30 * time.Second
 )
+
+// httpClient is the shared client for every network tool. Its Timeout covers the
+// whole exchange, including reading the body.
+var httpClient = &http.Client{Timeout: webTimeout}
 
 var (
 	ddgLink    = regexp.MustCompile(`(?s)<a[^>]*class="result__a"[^>]*href="([^"]+)"[^>]*>(.*?)</a>`)
@@ -51,7 +61,7 @@ type webSearchArgs struct {
 }
 
 func webSearch(p *Policy) Tool {
-	return Func[webSearchArgs](webSearchSpec, func(ctx context.Context, a webSearchArgs) (Result, error) {
+	return budgeted(Func[webSearchArgs](webSearchSpec, func(ctx context.Context, a webSearchArgs) (Result, error) {
 		if err := p.guard(ctx, Request{Tool: "web_search", Access: AccessNetwork, Target: a.Query}); err != nil {
 			return Result{}, err
 		}
@@ -60,7 +70,7 @@ func webSearch(p *Policy) Tool {
 			return Result{}, err
 		}
 		return Result{Output: out}, nil
-	})
+	}), webDeadline)
 }
 
 type webFetchArgs struct {
@@ -68,7 +78,7 @@ type webFetchArgs struct {
 }
 
 func webFetch(p *Policy) Tool {
-	return Func[webFetchArgs](webFetchSpec, func(ctx context.Context, a webFetchArgs) (Result, error) {
+	return budgeted(Func[webFetchArgs](webFetchSpec, func(ctx context.Context, a webFetchArgs) (Result, error) {
 		if err := p.guard(ctx, Request{Tool: "web_fetch", Access: AccessNetwork, Target: a.URL}); err != nil {
 			return Result{}, err
 		}
@@ -77,8 +87,11 @@ func webFetch(p *Policy) Tool {
 			return Result{}, err
 		}
 		return Result{Output: out}, nil
-	})
+	}), webDeadline)
 }
+
+// webDeadline is fixed: a page that needs longer than this is not worth a turn.
+func webDeadline(Call) time.Duration { return webTimeout }
 
 // duckSearch scrapes DuckDuckGo's HTML endpoint. It is a minimal fallback: no API
 // key, and good enough to return titles, URLs and snippets.
@@ -90,7 +103,7 @@ func duckSearch(ctx context.Context, query string) (string, error) {
 	}
 	req.Header.Set("User-Agent", searchUserAgent)
 
-	resp, err := http.DefaultClient.Do(req)
+	resp, err := httpClient.Do(req)
 	if err != nil {
 		return "", err
 	}
@@ -130,7 +143,7 @@ func fetchText(ctx context.Context, rawURL string) (string, error) {
 	req.Header.Set("User-Agent", searchUserAgent)
 	req.Header.Set("Accept", "text/html,text/plain;q=0.9,*/*;q=0.5")
 
-	resp, err := http.DefaultClient.Do(req)
+	resp, err := httpClient.Do(req)
 	if err != nil {
 		return "", err
 	}

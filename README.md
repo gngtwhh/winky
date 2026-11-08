@@ -116,6 +116,23 @@ Type a task and press Enter. The model can call these tools:
 
 The default permission is `workspace`: reads and writes inside the workspace are allowed automatically. Access outside the workspace, shell commands, and network requests require approval or a higher permission level.
 
+### Tool limits
+
+Every call is bounded, so a stuck tool cannot make the session interactive-hostile:
+
+- `shell` takes an optional `timeout` in seconds. Without one the call gets a
+  generous default; either way the whole process tree is killed when it is spent,
+  and output keeps only its tail (long builds print their errors last).
+- `web_search` and `web_fetch` time out after 30 seconds.
+- `read_file` and `edit_file` only read regular files, so a FIFO or a device node
+  is refused instead of blocking a read that nothing can interrupt.
+- A tool that does not stop when its budget is spent is abandoned after a grace
+  period. The model is told its output was lost and that it may still be running.
+- If the model issues the same call three times in a row, the third is refused
+  instead of run, which breaks the "run the same command forever" loop.
+
+Pressing `Esc` still cancels immediately, and it wins over any budget.
+
 Available commands:
 
 | Command | Effect |
@@ -226,7 +243,7 @@ kept verbatim.
 
 ```text
 cmd/tui/                    entry point and agent wiring
-internal/agent/             agent loop, view projection, and context compaction
+internal/agent/             agent loop, view projection, compaction, and the tool-call supervisor
 internal/llm/               request/response types and OpenAI Responses client
 internal/llm/api/           provider adapters
 internal/tool/              filesystem, shell, web tools and permission policy

@@ -244,18 +244,15 @@ func (fs *FS) readFile() Tool {
 			return Result{}, err
 		}
 
+		if err := fs.checkTextFile(path, maxReadBytes); err != nil {
+			return Result{}, err
+		}
 		info, err := os.Stat(path)
 		if err != nil {
 			return Result{}, err
 		}
 		if info.IsDir() {
 			return Result{}, fmt.Errorf("%s is a directory; use list_dir", fs.display(path))
-		}
-		if info.Size() > maxReadBytes {
-			return Result{}, fmt.Errorf(
-				"%s is %s, over the %s text read limit", fs.display(path),
-				humanSize(info.Size()), humanSize(maxReadBytes),
-			)
 		}
 
 		data, err := os.ReadFile(path)
@@ -355,6 +352,9 @@ func (fs *FS) editFile() Tool {
 			return Result{}, err
 		}
 
+		if err := fs.checkTextFile(path, maxReadBytes); err != nil {
+			return Result{}, err
+		}
 		data, err := os.ReadFile(path)
 		if err != nil {
 			return Result{}, err
@@ -595,6 +595,29 @@ func clipLine(s string) string {
 		return s
 	}
 	return cutAtRune(s, maxLineBytes) + "…"
+}
+
+// checkTextFile rejects anything that is not a regular file within the size
+// limit, before a read touches it.
+//
+// The regular-file check is not cosmetic: reading a FIFO or a character device
+// blocks forever, and a blocked read cannot be interrupted — not by a context,
+// not by a deadline. The only defence is not to start it.
+func (fs *FS) checkTextFile(path string, maxBytes int64) error {
+	info, err := os.Stat(path)
+	if err != nil {
+		return err
+	}
+	if !info.Mode().IsRegular() {
+		return fmt.Errorf("%s is not a regular file", fs.display(path))
+	}
+	if info.Size() > maxBytes {
+		return fmt.Errorf(
+			"%s is %s, over the %s limit", fs.display(path),
+			humanSize(info.Size()), humanSize(maxBytes),
+		)
+	}
+	return nil
 }
 
 // isBinary reports whether data looks binary: a NUL byte in the first 8 KiB.

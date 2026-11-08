@@ -13,6 +13,7 @@ import (
 	"encoding/json/v2"
 	"fmt"
 	"strings"
+	"time"
 
 	"winky/internal/llm"
 )
@@ -80,6 +81,30 @@ func (f *funcTool[T]) Invoke(ctx context.Context, call Call) (Result, error) {
 // Sequenced marks a tool whose calls must run one at a time, in issue order,
 // rather than concurrently with sibling calls in the same step.
 type Sequenced interface{ Sequential() bool }
+
+// Budgeted reports how long one call may run. The runner enforces it: it cancels
+// the call's context when the budget is spent, which the tool is expected to
+// honour by returning the output it already produced.
+//
+// A zero duration means "no declared budget": the runner falls back to its own
+// ceiling. Tools that have no meaningful slow path can leave it at zero; tools
+// whose call may legitimately take minutes (shell, web) should declare it,
+// usually from their own arguments.
+type Budgeted interface {
+	Deadline(c Call) time.Duration
+}
+
+// budgeted attaches a declared budget to a tool.
+func budgeted(t Tool, deadline func(Call) time.Duration) Tool {
+	return budgetedTool{Tool: t, deadline: deadline}
+}
+
+type budgetedTool struct {
+	Tool
+	deadline func(Call) time.Duration
+}
+
+func (b budgetedTool) Deadline(c Call) time.Duration { return b.deadline(c) }
 
 // sequenced wraps a tool to mark it sequential.
 func sequenced(t Tool) Tool { return sequencedTool{t} }
