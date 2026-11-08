@@ -49,19 +49,19 @@ type shellArgs struct {
 // tree: the shell is only an intermediate, and the process that actually does
 // the work is its child. Killing just the shell would leave the work running and
 // leave the output pipe open, which is how a cancelled call used to hang.
-func shell(p *Policy, dir string) Tool {
+func shell(_ *Policy, dir string) Tool {
 	return budgeted(
-		Func[shellArgs](shellSpec, func(ctx context.Context, a shellArgs) (Result, error) {
-			if err := p.guard(ctx, Request{
-				Tool: "shell", Access: AccessShell, Target: a.Command,
-			}); err != nil {
-				return Result{}, err
-			}
-			if a.Command == "" {
-				return Result{}, errors.New("command must not be empty")
-			}
-			return runShell(ctx, dir, a.Command)
-		}),
+		guarded(
+			Func[shellArgs](shellSpec, func(ctx context.Context, a shellArgs) (Result, error) {
+				if a.Command == "" {
+					return Result{}, errors.New("command must not be empty")
+				}
+				return runShell(ctx, dir, a.Command)
+			}),
+			func(a shellArgs) (Request, error) {
+				return Request{Tool: "shell", Access: AccessShell, Target: a.Command}, nil
+			},
+		),
 		shellDeadline,
 	)
 }

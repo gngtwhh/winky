@@ -3,10 +3,10 @@ package agent
 import (
 	"context"
 	"fmt"
-	"sync"
 	"time"
 
 	"winky/internal/llm"
+	"winky/internal/schema"
 	"winky/internal/tool"
 	"winky/internal/transcript"
 )
@@ -20,6 +20,10 @@ type Toolset interface {
 	// Deadline reports how long this call may run; zero defers to the agent's
 	// own ceiling.
 	Deadline(call tool.Call) time.Duration
+	// Allow decides whether the call may run, asking the user when the policy
+	// requires it. It is called before the call starts, so the permission wait
+	// is not billed to the call's budget or its elapsed time.
+	Allow(ctx context.Context, call tool.Call) error
 }
 
 // Tool-call budgets. These are a safety net, not a policy: a tool declares its
@@ -62,59 +66,88 @@ func (g *callGuard) exhausted(c tool.Call) bool {
 // call, because a missing result breaks the tool-call group in the transcript.
 //
 // Calls run concurrently unless any tool requires sequential execution, in which
-// case all run in issue order. Each call gets its own budget and its own
-// cancellation, so one slow tool cannot cut its siblings short.
-func (a *Agent) runTools(ctx context.Context, calls []tool.Call) []ToolResult {
+// case all run in issue order. Each call gets its own cancellation and its own
+// budget, so one slow tool cannot cut its siblings short.
+//
+// sink is called on the calling goroutine the moment each call settles, so a
+// fast call is recorded and reported without waiting for a slow sibling.
+func (a *Agent) runTools(ctx context.Context, calls []tool.Call, sink func(ToolResult)) []ToolResult {
 	results := make([]ToolResult, len(calls))
+	settle := func(i int, res ToolResult) {
+		results[i] = res
+		sink(res)
+	}
+
 	if a.tools == nil {
 		for i, c := range calls {
-			results[i] = ToolResult{
+			settle(i, ToolResult{
 				CallID: c.ID, Name: c.Name,
 				Output: "error: no tools are registered", IsError: true,
-			}
+			})
 		}
 		return results
 	}
 
-	// The repeat guard is decided here, in issue order, before anything is
-	// dispatched: it is a property of the sequence of calls, and it must not be
-	// mutated from the goroutines that run them.
+	// Refusal and authorization happen here, in issue order, on this goroutine:
+	// both are properties of the sequence of calls, and neither may be decided
+	// from the goroutines that run them.
+	dispatchable := func(i int, c tool.Call) bool {
+		if a.calls.exhausted(c) {
+			settle(i, repeatedCallResult(c))
+			return false
+		}
+		if err := a.tools.Allow(ctx, c); err != nil {
+			if ctx.Err() != nil {
+				settle(i, abortedToolResult(c))
+			} else {
+				settle(i, deniedToolResult(c, err))
+			}
+			return false
+		}
+		return true
+	}
+
 	if a.sequential(calls) {
 		for i, c := range calls {
 			if ctx.Err() != nil {
-				abortFrom(results, calls, i)
+				abortFrom(calls, settle, i)
 				return results
 			}
-			if a.calls.exhausted(c) {
-				results[i] = repeatedCallResult(c)
+			if !dispatchable(i, c) {
 				continue
 			}
-			results[i] = a.runTool(ctx, c)
+			settle(i, a.dispatch(ctx, c))
 			if results[i].Aborted {
-				abortFrom(results, calls, i+1)
+				abortFrom(calls, settle, i+1)
 				return results
 			}
 		}
 		return results
 	}
 
-	var wg sync.WaitGroup
+	type settled struct {
+		i   int
+		res ToolResult
+	}
+	// Buffered for every call, so a worker never blocks on a leader that is busy
+	// recording an earlier result.
+	done := make(chan settled, len(calls))
+	running := 0
 	for i, c := range calls {
 		if ctx.Err() != nil {
-			abortFrom(results, calls, i)
+			abortFrom(calls, settle, i)
 			break
 		}
-		if a.calls.exhausted(c) {
-			results[i] = repeatedCallResult(c)
+		if !dispatchable(i, c) {
 			continue
 		}
-		wg.Add(1)
-		go func(i int, c tool.Call) {
-			defer wg.Done()
-			results[i] = a.runTool(ctx, c)
-		}(i, c)
+		running++
+		go func(i int, c tool.Call) { done <- settled{i, a.dispatch(ctx, c)} }(i, c)
 	}
-	wg.Wait()
+	for n := 0; n < running; n++ {
+		s := <-done
+		settle(s.i, s.res)
+	}
 	return results
 }
 
@@ -128,16 +161,22 @@ func (a *Agent) sequential(calls []tool.Call) bool {
 	return false
 }
 
-// abortFrom fills the calls from index i with aborted results.
-func abortFrom(results []ToolResult, calls []tool.Call, i int) {
+// abortFrom settles every call from index i as aborted.
+func abortFrom(calls []tool.Call, settle func(int, ToolResult), i int) {
 	for ; i < len(calls); i++ {
-		results[i] = abortedToolResult(calls[i])
+		settle(i, abortedToolResult(calls[i]))
 	}
 }
 
-// runTool executes one call under its budget.
-func (a *Agent) runTool(ctx context.Context, c tool.Call) ToolResult {
-	return a.supervise(ctx, c, a.callBudget(c))
+// dispatch resolves the budget, tells the UI the call is starting, and runs it.
+// The budget is attached to the result too, so a settled call can show how close
+// it came to the limit.
+func (a *Agent) dispatch(ctx context.Context, c tool.Call) ToolResult {
+	budget := a.callBudget(c)
+	a.emit(schema.ToolCallBegin{CallID: c.ID, Name: c.Name, Budget: budget})
+	res := a.supervise(ctx, c, budget)
+	res.Budget = budget
+	return res
 }
 
 // repeatedCallResult refuses a call that would repeat the previous one again,
@@ -150,6 +189,15 @@ func repeatedCallResult(c tool.Call) ToolResult {
 				"between, so it was not run again. Change the arguments, or say what you expected "+
 				"to learn from it.", repeatLimit-1,
 		),
+	}
+}
+
+// deniedToolResult reports a call the policy refused, or one that was cancelled
+// while the user was still deciding.
+func deniedToolResult(c tool.Call, err error) ToolResult {
+	return ToolResult{
+		CallID: c.ID, Name: c.Name,
+		Output: "error: " + err.Error(), IsError: true,
 	}
 }
 

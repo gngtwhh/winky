@@ -131,6 +131,9 @@ Every call is bounded, so a stuck tool cannot make the session interactive-hosti
 - If the model issues the same call three times in a row, the third is refused
   instead of run, which breaks the "run the same command forever" loop.
 
+The time you spend answering a permission prompt is not billed to the call: the
+budget and the stopwatch start once you allow it, and a refused call never runs.
+
 Pressing `Esc` still cancels immediately, and it wins over any budget.
 
 Available commands:

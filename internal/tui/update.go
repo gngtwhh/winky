@@ -45,9 +45,9 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m.handleCompactResult(msg)
 
 	case tickMsg:
-		// The rebuild tick only flushes pending deltas; the spinner advances
-		// through its own spinner.TickMsg below.
-		if m.dirty {
+		// The rebuild tick flushes pending deltas and keeps a running tool's
+		// stopwatch moving; the spinner advances through its own tick below.
+		if m.dirty || m.hasRunningTool() {
 			m.rebuild()
 		}
 		if m.streaming {
@@ -278,6 +278,22 @@ func (m *model) handleEvent(e schema.Event) tea.Cmd {
 		m.cards[idx].Text = ev.Arguments
 		m.dirty = true
 
+	case schema.ToolCallBegin:
+		// Execution starts here, not when the arguments began streaming: the
+		// timer must measure the call, not the model writing it down.
+		if !m.streaming || m.cancelled[m.turn] {
+			return nil
+		}
+		idx := m.ensureBlock(blockKey{kind: cardTool, id: ev.CallID})
+		if ev.Name != "" {
+			m.cards[idx].Title = ev.Name
+		}
+		m.cards[idx].At = time.Now()
+		m.cards[idx].Budget = ev.Budget
+		m.cards[idx].Live = true
+		m.dirty = true
+		return nil
+
 	case schema.ToolResult:
 		if !m.streaming || m.cancelled[m.turn] {
 			return nil
@@ -286,6 +302,8 @@ func (m *model) handleEvent(e schema.Event) tea.Cmd {
 		m.cards[idx].Output = ev.Output
 		m.cards[idx].IsError = ev.IsError
 		m.cards[idx].Duration = ev.Duration
+		m.cards[idx].Budget = ev.Budget
+		m.cards[idx].Live = false
 		m.dirty = true
 
 	case schema.ContextUsage:
@@ -374,7 +392,9 @@ func (m *model) ensureBlock(key blockKey) int {
 	if idx, ok := m.liveBlocks[key]; ok {
 		return idx
 	}
-	c := card{Kind: key.kind, ID: key.id, At: m.started, Live: true}
+	// A tool card becomes live only when the call actually starts, so its timer
+	// does not run while the model is still writing the arguments.
+	c := card{Kind: key.kind, ID: key.id, At: m.started, Live: key.kind != cardTool}
 	if key.kind.collapsible() {
 		c.Expanded = true // stream inline
 	}
@@ -405,6 +425,7 @@ func (m *model) applyTurn(turn schema.Turn) {
 				c.Output = r.Output
 				c.IsError = r.IsError
 				c.Duration = r.Duration
+				c.Budget = r.Budget
 			}
 		}
 		m.cards = append(m.cards, c)

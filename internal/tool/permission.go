@@ -62,9 +62,12 @@ type Request struct {
 // Prompter asks the user whether to allow a request; nil means "deny".
 type Prompter func(ctx context.Context, req Request) (bool, error)
 
-// Policy holds the session's tool authority, shared by the tools and the TUI.
-// Tools consult it before sensitive operations; the TUI flips the level with a
-// command and answers prompts through the prompter.
+// Policy holds the session's tool authority. One instance is shared by the
+// registry that enforces it and the TUI that displays and changes it.
+//
+// Tools never read it: each tool only declares what a call needs (Guarded), and
+// the registry asks the policy before the call starts. That is what keeps the
+// time spent waiting for the user out of the call's budget.
 type Policy struct {
 	mu       sync.RWMutex
 	perm     Permission

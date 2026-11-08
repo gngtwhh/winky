@@ -94,6 +94,16 @@ type Budgeted interface {
 	Deadline(c Call) time.Duration
 }
 
+// Guarded reports the permission a call needs. The runner asks before the call
+// starts, so the time a user spends deciding is not billed to the call's budget
+// or its elapsed time, and a refused call never runs at all.
+//
+// The returned Request's Tool field names the operation. An empty Request means
+// the call needs no permission.
+type Guarded interface {
+	PolicyRequest(c Call) (Request, error)
+}
+
 // budgeted attaches a declared budget to a tool.
 func budgeted(t Tool, deadline func(Call) time.Duration) Tool {
 	return budgetedTool{Tool: t, deadline: deadline}
@@ -106,12 +116,45 @@ type budgetedTool struct {
 
 func (b budgetedTool) Deadline(c Call) time.Duration { return b.deadline(c) }
 
+// PolicyRequest forwards the inner capability: a wrapper only implements the one
+// it adds, so it must not drop the others on the floor.
+func (b budgetedTool) PolicyRequest(c Call) (Request, error) { return policyRequestOf(b.Tool, c) }
+
+// guarded attaches a permission request builder to a tool.
+func guarded[T any](t Tool, request func(T) (Request, error)) Tool {
+	return guardedTool[T]{Tool: t, request: request}
+}
+
+type guardedTool[T any] struct {
+	Tool
+	request func(T) (Request, error)
+}
+
+func (g guardedTool[T]) PolicyRequest(c Call) (Request, error) {
+	args, err := decodeArgs[T](c)
+	if err != nil {
+		return Request{}, err
+	}
+	return g.request(args)
+}
+
 // sequenced wraps a tool to mark it sequential.
 func sequenced(t Tool) Tool { return sequencedTool{t} }
 
 type sequencedTool struct{ Tool }
 
 func (sequencedTool) Sequential() bool { return true }
+
+// PolicyRequest forwards the inner capability, as budgetedTool does.
+func (s sequencedTool) PolicyRequest(c Call) (Request, error) { return policyRequestOf(s.Tool, c) }
+
+// policyRequestOf asks a tool for the permission its call needs.
+func policyRequestOf(t Tool, c Call) (Request, error) {
+	if g, ok := t.(Guarded); ok {
+		return g.PolicyRequest(c)
+	}
+	return Request{}, nil
+}
 
 // decodeArgs decodes a call's raw JSON arguments into T. Empty arguments (a tool
 // that takes none) and an explicit null both decode to the zero value.

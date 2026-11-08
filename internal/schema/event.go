@@ -45,6 +45,16 @@ type ToolCallArgsDelta struct {
 	Delta  string
 }
 
+// ToolCallBegin reports that the runner has started executing a call, and how
+// long it may run. It is emitted at dispatch time, which is later than
+// ToolCallStart: the arguments have to be complete before a budget can be
+// resolved, and a sequential step starts its calls one after another.
+type ToolCallBegin struct {
+	CallID string
+	Name   string
+	Budget time.Duration
+}
+
 // ToolCallEnd carries the complete arguments for a tool call.
 type ToolCallEnd struct {
 	CallID    string
@@ -114,8 +124,9 @@ func (ToolCallStart) agentEventType() string { return "tool_call_start" }
 func (ToolCallArgsDelta) agentEventType() string {
 	return "tool_call_args_delta"
 }
-func (ToolCallEnd) agentEventType() string { return "tool_call_end" }
-func (ToolResult) agentEventType() string  { return "tool_result" }
-func (TurnEnd) agentEventType() string     { return "turn_end" }
-func (TurnFailed) agentEventType() string  { return "turn_failed" }
-func (TurnAborted) agentEventType() string { return "turn_aborted" }
+func (ToolCallBegin) agentEventType() string { return "tool_call_begin" }
+func (ToolCallEnd) agentEventType() string   { return "tool_call_end" }
+func (ToolResult) agentEventType() string    { return "tool_result" }
+func (TurnEnd) agentEventType() string       { return "turn_end" }
+func (TurnFailed) agentEventType() string    { return "turn_failed" }
+func (TurnAborted) agentEventType() string   { return "turn_aborted" }

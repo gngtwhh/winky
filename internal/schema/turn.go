@@ -52,6 +52,9 @@ type ToolResult struct {
 	IsError  bool
 	Aborted  bool
 	Duration time.Duration
+	// Budget is how long the call was allowed to take. Zero means the runner
+	// imposed none, which the UI shows as unknown rather than infinite.
+	Budget time.Duration
 }
 
 // Reasoning returns the concatenated reasoning text.

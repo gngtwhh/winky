@@ -46,6 +46,17 @@ func (m *model) appendCard(c card) {
 	m.rebuild()
 }
 
+// hasRunningTool reports whether a tool of the current turn is still running,
+// which is when its stopwatch has to keep refreshing.
+func (m *model) hasRunningTool() bool {
+	for i := m.turnStartIdx; i < len(m.cards); i++ {
+		if m.cards[i].Kind == cardTool && m.cards[i].Live {
+			return true
+		}
+	}
+	return false
+}
+
 // lastCard returns the trailing card of the given kind, live or not.
 func (m *model) lastCard(k cardKind) *card {
 	for i := len(m.cards) - 1; i >= 0; i-- {

@@ -179,6 +179,7 @@ func (f *fakeTools) Specs() []llm.ToolSpec                          { return nil
 func (f *fakeTools) Run(_ context.Context, c tool.Call) tool.Result { return f.res[c.Name] }
 func (f *fakeTools) Sequential(string) bool                         { return false }
 func (f *fakeTools) Deadline(tool.Call) time.Duration               { return 0 }
+func (f *fakeTools) Allow(context.Context, tool.Call) error         { return nil }
 
 // gatedStreamer emits a partial output, then reports cancellation like the
 // provider adapter.
@@ -267,6 +268,9 @@ type blockingTools struct {
 func (b *blockingTools) Specs() []llm.ToolSpec            { return nil }
 func (b *blockingTools) Sequential(string) bool           { return b.sequential }
 func (b *blockingTools) Deadline(tool.Call) time.Duration { return 0 }
+func (b *blockingTools) Allow(context.Context, tool.Call) error {
+	return nil
+}
 func (b *blockingTools) Run(ctx context.Context, c tool.Call) tool.Result {
 	b.once.Do(func() { close(b.started) })
 	<-ctx.Done()

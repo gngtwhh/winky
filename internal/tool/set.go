@@ -6,12 +6,12 @@ func NewDefault(root string, p *Policy) (*Registry, error) {
 	if p == nil {
 		p = NewPolicy(WorkspaceWrite)
 	}
-	fs, err := NewFS(root, p)
+	fs, err := NewFS(root)
 	if err != nil {
 		return nil, err
 	}
 
-	reg := NewRegistry()
+	reg := NewRegistry().SetPolicy(p)
 	for _, t := range fs.Tools() {
 		if err := reg.Register(t); err != nil {
 			return nil, err

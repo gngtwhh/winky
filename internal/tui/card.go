@@ -28,7 +28,8 @@ type card struct {
 	IsError  bool   // tool result was an error, for cardTool
 	At       time.Time
 	Duration time.Duration // assistant card: turn wall time; tool card: execution time
-	Live     bool          // still being streamed into
+	Budget   time.Duration // tool card: how long the call was allowed to run
+	Live     bool          // still in progress: streaming into, or a running tool
 	Expanded bool          // collapsible cards only (reasoning / summary)
 }
 
@@ -71,11 +72,56 @@ func (c card) labelText() string {
 				head += " ✓"
 			}
 		}
-		if d := c.Duration.Round(time.Millisecond); d > 0 {
-			head = fmt.Sprintf("%s · %s", head, d)
-		}
 	}
 	return head
+}
+
+// timing is the right-aligned suffix of a tool card's label: how long the call
+// took, or has been running, and how long it was allowed to take. A call that
+// never ran has neither.
+func (c card) timing() string {
+	if c.Kind != cardTool {
+		return ""
+	}
+	elapsed := c.Duration
+	if c.Live && !c.At.IsZero() {
+		// Still running: the viewport is re-rendered on every tick, so this
+		// reads as a stopwatch without any stored state.
+		elapsed = time.Since(c.At)
+	}
+	if elapsed <= 0 && c.Budget <= 0 {
+		return ""
+	}
+	limit := "-"
+	if c.Budget > 0 {
+		limit = shortDuration(c.Budget)
+	}
+	return shortDuration(elapsed) + " / " + limit
+}
+
+// shortDuration formats a duration for a single-line label: "312µs", "847ms",
+// "1.2s", "1m30s", "10m", "1.0h".
+func shortDuration(d time.Duration) string {
+	switch {
+	case d <= 0:
+		return "0s"
+	case d < time.Millisecond:
+		return d.Round(time.Microsecond).String()
+	case d < time.Second:
+		return d.Round(time.Millisecond).String()
+	case d < time.Minute:
+		return d.Round(100 * time.Millisecond).String()
+	case d < time.Hour:
+		minutes := int(d / time.Minute)
+		if seconds := int(d/time.Second) % 60; seconds != 0 {
+			return fmt.Sprintf("%dm%02ds", minutes, seconds)
+		}
+		return fmt.Sprintf("%dm", minutes)
+	case d%time.Hour == 0:
+		return fmt.Sprintf("%dh", int(d.Hours()))
+	default:
+		return fmt.Sprintf("%.1fh", d.Hours())
+	}
 }
 
 func (k cardKind) label() string {
@@ -104,7 +150,13 @@ func (k cardKind) label() string {
 // element is a blank separator that rebuild drops.
 func (c card) lines(width int) []cardLine {
 	out := make([]cardLine, 0, 8)
-	out = append(out, cardLine{text: c.labelText(), label: true})
+	label := c.labelText()
+	if timing := c.timing(); timing != "" {
+		// Right-aligned against the card width, so the numbers line up down the
+		// scrollback instead of trailing names of different lengths.
+		label = pair(label, timing, width)
+	}
+	out = append(out, cardLine{text: label, label: true})
 
 	body := c.Text
 	if c.Kind.collapsible() && !c.Live && !c.Expanded {

@@ -24,14 +24,53 @@ var nameRE = regexp.MustCompile(`^[A-Za-z0-9_-]{1,64}$`)
 // the tool list is part of the request prefix, so changing it invalidates
 // provider-side prompt caching for every later turn.
 type Registry struct {
-	mu    sync.RWMutex
-	tools map[string]Tool
-	limit int // 0 means DefaultMaxOutputBytes
+	mu     sync.RWMutex
+	tools  map[string]Tool
+	limit  int     // 0 means DefaultMaxOutputBytes
+	policy *Policy // nil means nothing is authorized
 }
 
 // NewRegistry returns an empty registry.
 func NewRegistry() *Registry {
 	return &Registry{tools: make(map[string]Tool)}
+}
+
+// SetPolicy attaches the permission policy Allow consults. Without one nothing
+// is authorized, which is the safe default.
+func (r *Registry) SetPolicy(p *Policy) *Registry {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.policy = p
+	return r
+}
+
+// Allow decides whether a call may run, asking the user through the policy's
+// prompter when the current permission level is not enough.
+//
+// It is separate from Run so the runner can ask before the call starts: the wait
+// for an answer must not come out of the call's budget, and a refused call must
+// never appear to have run.
+func (r *Registry) Allow(ctx context.Context, call Call) error {
+	t, ok := r.Lookup(call.Name)
+	if !ok {
+		// Run reports the unknown tool; there is nothing to authorize.
+		return nil
+	}
+	req, err := policyRequestOf(t, call)
+	if err != nil {
+		return err
+	}
+	if req.Tool == "" {
+		return nil
+	}
+
+	r.mu.RLock()
+	p := r.policy
+	r.mu.RUnlock()
+	if p == nil {
+		return &DeniedError{Req: req}
+	}
+	return p.guard(ctx, req)
 }
 
 // SetMaxOutputBytes overrides the per-call output cap for every tool in the

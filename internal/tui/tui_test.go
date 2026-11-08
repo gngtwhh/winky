@@ -768,3 +768,131 @@ func TestUnknownCommandPointsAtHelp(t *testing.T) {
 		t.Fatalf("status = %q, want a pointer to /?", m.status)
 	}
 }
+
+// A tool card shows how long the call took and how long it was allowed to take,
+// right-aligned so the numbers line up down the scrollback.
+func TestToolCardShowsElapsedAndBudget(t *testing.T) {
+	c := card{
+		Kind:     cardTool,
+		Title:    "shell",
+		Duration: 1200 * time.Millisecond,
+		Budget:   10 * time.Minute,
+	}
+
+	label := c.lines(40)[0].text
+	if !strings.Contains(label, "1.2s / 10m") {
+		t.Fatalf("label = %q, want elapsed and budget", label)
+	}
+	if got := displayWidth(label); got != 40 {
+		t.Fatalf("label width = %d, want it right-aligned to 40", got)
+	}
+}
+
+// A call the runner never bounded prints "-" for the limit instead of implying
+// one exists.
+func TestToolCardWithoutBudgetShowsDash(t *testing.T) {
+	c := card{Kind: cardTool, Title: "echo", Duration: time.Second}
+
+	if label := c.lines(40)[0].text; !strings.Contains(label, "1s / -") {
+		t.Fatalf("label = %q, want a dash for the missing budget", label)
+	}
+}
+
+// A call that never ran has nothing to report and gets no timing at all.
+func TestToolCardWithoutTiming(t *testing.T) {
+	c := card{Kind: cardTool, Title: "echo"}
+
+	if label := c.lines(40)[0].text; strings.Contains(label, "/") {
+		t.Fatalf("label = %q, want no timing", label)
+	}
+}
+
+// The budget reaches the card from the tool result event.
+func TestToolResultEventCarriesBudget(t *testing.T) {
+	m := newTestModel(t, newFakeAgent())
+	m.handleEvent(schema.TurnStart{})
+
+	m.handleEvent(schema.ToolCallStart{CallID: "c1", Name: "shell"})
+	m.handleEvent(schema.ToolResult{
+		CallID: "c1", Name: "shell", Output: "ok",
+		Duration: 500 * time.Millisecond, Budget: 30 * time.Second,
+	})
+
+	last := m.cards[len(m.cards)-1]
+	if last.Budget != 30*time.Second || last.Duration != 500*time.Millisecond {
+		t.Fatalf("card = %+v, want the event's timing", last)
+	}
+}
+
+// The stopwatch starts when the call starts, not when the model began writing
+// its arguments.
+func TestStopwatchStartsAtToolCallBegin(t *testing.T) {
+	m := newTestModel(t, newFakeAgent())
+	m.handleEvent(schema.TurnStart{})
+	m.handleEvent(schema.ToolCallStart{CallID: "c1", Name: "shell"})
+
+	created := m.cards[len(m.cards)-1]
+	if created.Live {
+		t.Fatal("a tool card is live before its call starts")
+	}
+	if got := created.lines(60)[0].text; strings.Contains(got, "/") {
+		t.Fatalf("label = %q, want no timing before the call starts", got)
+	}
+
+	m.handleEvent(schema.ToolCallBegin{CallID: "c1", Name: "shell", Budget: 2 * time.Minute})
+
+	running := m.cards[len(m.cards)-1]
+	if !running.Live {
+		t.Fatal("card is not live after the call started")
+	}
+	if running.Budget != 2*time.Minute {
+		t.Fatalf("budget = %v, want 2m", running.Budget)
+	}
+	if got := running.lines(60)[0].text; !strings.HasSuffix(got, "/ 2m") {
+		t.Fatalf("label = %q, want the limit while running", got)
+	}
+	if !m.hasRunningTool() {
+		t.Fatal("hasRunningTool = false while a call runs")
+	}
+
+	m.handleEvent(schema.ToolResult{
+		CallID: "c1", Name: "shell", Output: "ok",
+		Duration: 1500 * time.Millisecond, Budget: 2 * time.Minute,
+	})
+
+	done := m.cards[len(m.cards)-1]
+	if done.Live {
+		t.Fatal("card is still live after the result")
+	}
+	if got := done.lines(60)[0].text; !strings.HasSuffix(got, "1.5s / 2m") {
+		t.Fatalf("label = %q, want the settled timing", got)
+	}
+	if m.hasRunningTool() {
+		t.Fatal("hasRunningTool = true after the call settled")
+	}
+}
+
+// The rebuild tick refreshes a running call's stopwatch even when no output is
+// streaming: the viewport is a rendered string, so nothing changes until the
+// scrollback is rebuilt.
+func TestTickRefreshesTheRunningStopwatch(t *testing.T) {
+	m := newTestModel(t, newFakeAgent())
+	m.handleEvent(schema.TurnStart{})
+	m.handleEvent(schema.ToolCallStart{CallID: "c1", Name: "shell"})
+	m.handleEvent(schema.ToolCallBegin{CallID: "c1", Name: "shell", Budget: 2 * time.Minute})
+
+	// Pretend the call has already been running for three seconds, and that no
+	// delta is pending.
+	m.cards[len(m.cards)-1].At = time.Now().Add(-3 * time.Second)
+	m.dirty = false
+
+	next, cmd := m.Update(tickMsg{ID: m.turn})
+	m = next.(model)
+
+	if cmd == nil {
+		t.Fatal("the tick did not re-arm while a turn is streaming")
+	}
+	if view := m.vp.View(); !strings.Contains(view, "3s / 2m") {
+		t.Fatalf("viewport does not show the running stopwatch:\n%s", view)
+	}
+}

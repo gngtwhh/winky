@@ -238,20 +238,30 @@ func (a *Agent) Turn(ctx context.Context, input string) (Turn, error) {
 			tcalls[i] = tool.Call{ID: b.ID, Name: b.Name, Arguments: b.Arguments}
 		}
 
-		results := a.runTools(ctx, tcalls)
-		turn.ToolResults = append(turn.ToolResults, results...)
-		for _, r := range results {
+		// Record and report each call as it settles: a fast tool must not wait
+		// for a slow sibling to appear in the transcript or on screen.
+		var recordErr error
+		a.runTools(ctx, tcalls, func(r ToolResult) {
+			turn.ToolResults = append(turn.ToolResults, r)
+			if recordErr != nil {
+				return
+			}
 			if err := a.record(transcript.ToolResult{
 				CallID: r.CallID, Output: r.Output, Aborted: r.Aborted,
 			}); err != nil {
-				return a.closeTurn(ctx, err, turnUsage, turn, true)
+				recordErr = err
+				return
 			}
 			a.emit(
 				ToolResult{
 					CallID: r.CallID, Name: r.Name, Output: r.Output,
-					IsError: r.IsError, Aborted: r.Aborted, Duration: r.Duration,
+					IsError: r.IsError, Aborted: r.Aborted,
+					Duration: r.Duration, Budget: r.Budget,
 				},
 			)
+		})
+		if recordErr != nil {
+			return a.closeTurn(ctx, recordErr, turnUsage, turn, true)
 		}
 
 		if err := a.record(transcript.StepEnd{Timestamp: time.Now(), Usage: usagePtr(usage)}); err != nil {

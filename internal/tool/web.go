@@ -60,16 +60,15 @@ type webSearchArgs struct {
 	Query string `json:"query"`
 }
 
-func webSearch(p *Policy) Tool {
-	return budgeted(Func[webSearchArgs](webSearchSpec, func(ctx context.Context, a webSearchArgs) (Result, error) {
-		if err := p.guard(ctx, Request{Tool: "web_search", Access: AccessNetwork, Target: a.Query}); err != nil {
-			return Result{}, err
-		}
+func webSearch(_ *Policy) Tool {
+	return budgeted(guarded(Func[webSearchArgs](webSearchSpec, func(ctx context.Context, a webSearchArgs) (Result, error) {
 		out, err := duckSearch(ctx, a.Query)
 		if err != nil {
 			return Result{}, err
 		}
 		return Result{Output: out}, nil
+	}), func(a webSearchArgs) (Request, error) {
+		return Request{Tool: "web_search", Access: AccessNetwork, Target: a.Query}, nil
 	}), webDeadline)
 }
 
@@ -77,16 +76,15 @@ type webFetchArgs struct {
 	URL string `json:"url"`
 }
 
-func webFetch(p *Policy) Tool {
-	return budgeted(Func[webFetchArgs](webFetchSpec, func(ctx context.Context, a webFetchArgs) (Result, error) {
-		if err := p.guard(ctx, Request{Tool: "web_fetch", Access: AccessNetwork, Target: a.URL}); err != nil {
-			return Result{}, err
-		}
+func webFetch(_ *Policy) Tool {
+	return budgeted(guarded(Func[webFetchArgs](webFetchSpec, func(ctx context.Context, a webFetchArgs) (Result, error) {
 		out, err := fetchText(ctx, a.URL)
 		if err != nil {
 			return Result{}, err
 		}
 		return Result{Output: out}, nil
+	}), func(a webFetchArgs) (Request, error) {
+		return Request{Tool: "web_fetch", Access: AccessNetwork, Target: a.URL}, nil
 	}), webDeadline)
 }
 

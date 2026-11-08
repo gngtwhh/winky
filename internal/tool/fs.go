@@ -29,15 +29,14 @@ const (
 // Paths are resolved against Root and symlink-resolved; whether an operation is
 // allowed (including paths outside Root) is decided by Policy at call time.
 type FS struct {
-	Root   string // absolute, symlink-resolved
-	Policy *Policy
+	Root string // absolute, symlink-resolved
 }
 
 // NewFS builds a filesystem tool set rooted at root. The directory must exist.
-func NewFS(root string, p *Policy) (*FS, error) {
-	if p == nil {
-		p = NewPolicy(WorkspaceWrite)
-	}
+//
+// The tools decide what a call needs but never check it themselves: the registry
+// asks before the call starts, so waiting for an answer is not billed to the call.
+func NewFS(root string) (*FS, error) {
 	if strings.TrimSpace(root) == "" {
 		return nil, errors.New("tool: workspace root is required")
 	}
@@ -56,7 +55,7 @@ func NewFS(root string, p *Policy) (*FS, error) {
 	if err != nil {
 		return nil, fmt.Errorf("tool: workspace %s: %w", abs, err)
 	}
-	return &FS{Root: real, Policy: p}, nil
+	return &FS{Root: real}, nil
 }
 
 // Tools returns the filesystem tools. Mutating tools are sequenced so two
@@ -72,9 +71,15 @@ func (fs *FS) Tools() []Tool {
 	}
 }
 
-// guard asks the policy to authorize one operation.
-func (fs *FS) guard(ctx context.Context, name string, a Access, target string, inside bool) error {
-	return fs.Policy.guard(ctx, Request{Tool: name, Access: a, Target: target, Inside: inside})
+// request names the permission one operation needs. Resolving the path here
+// duplicates the resolution Invoke does, which is the price of asking before the
+// call starts instead of after it has begun.
+func (fs *FS) request(name string, a Access, p string) (Request, error) {
+	path, inside, err := fs.resolve(p)
+	if err != nil {
+		return Request{}, err
+	}
+	return Request{Tool: name, Access: a, Target: fs.display(path), Inside: inside}, nil
 }
 
 // resolve maps a path argument to an absolute path. inside reports whether the
@@ -232,15 +237,12 @@ type readFileArgs struct {
 }
 
 func (fs *FS) readFile() Tool {
-	return Func[readFileArgs](readFileSpec, func(ctx context.Context, a readFileArgs) (Result, error) {
+	return guarded(Func[readFileArgs](readFileSpec, func(ctx context.Context, a readFileArgs) (Result, error) {
 		if err := ctx.Err(); err != nil {
 			return Result{}, err
 		}
-		path, inside, err := fs.resolve(a.Path)
+		path, _, err := fs.resolve(a.Path)
 		if err != nil {
-			return Result{}, err
-		}
-		if err := fs.guard(ctx, "read_file", AccessRead, fs.display(path), inside); err != nil {
 			return Result{}, err
 		}
 
@@ -292,6 +294,8 @@ func (fs *FS) readFile() Tool {
 			fmt.Fprintf(&b, "[%d more lines; continue with offset=%d]\n", len(lines)-end, end+1)
 		}
 		return Result{Output: b.String()}, nil
+	}), func(a readFileArgs) (Request, error) {
+		return fs.request("read_file", AccessRead, a.Path)
 	})
 }
 
@@ -301,15 +305,12 @@ type writeFileArgs struct {
 }
 
 func (fs *FS) writeFile() Tool {
-	return Func[writeFileArgs](writeFileSpec, func(ctx context.Context, a writeFileArgs) (Result, error) {
+	return guarded(Func[writeFileArgs](writeFileSpec, func(ctx context.Context, a writeFileArgs) (Result, error) {
 		if err := ctx.Err(); err != nil {
 			return Result{}, err
 		}
-		path, inside, err := fs.resolve(a.Path)
+		path, _, err := fs.resolve(a.Path)
 		if err != nil {
-			return Result{}, err
-		}
-		if err := fs.guard(ctx, "write_file", AccessWrite, fs.display(path), inside); err != nil {
 			return Result{}, err
 		}
 
@@ -323,6 +324,8 @@ func (fs *FS) writeFile() Tool {
 			return Result{}, err
 		}
 		return Result{Output: fmt.Sprintf("wrote %d bytes to %s", len(a.Content), fs.display(path))}, nil
+	}), func(a writeFileArgs) (Request, error) {
+		return fs.request("write_file", AccessWrite, a.Path)
 	})
 }
 
@@ -334,7 +337,7 @@ type editFileArgs struct {
 }
 
 func (fs *FS) editFile() Tool {
-	return Func[editFileArgs](editFileSpec, func(ctx context.Context, a editFileArgs) (Result, error) {
+	return guarded(Func[editFileArgs](editFileSpec, func(ctx context.Context, a editFileArgs) (Result, error) {
 		if err := ctx.Err(); err != nil {
 			return Result{}, err
 		}
@@ -344,11 +347,8 @@ func (fs *FS) editFile() Tool {
 		if a.OldString == a.NewString {
 			return Result{}, errors.New("old_string and new_string are identical")
 		}
-		path, inside, err := fs.resolve(a.Path)
+		path, _, err := fs.resolve(a.Path)
 		if err != nil {
-			return Result{}, err
-		}
-		if err := fs.guard(ctx, "edit_file", AccessWrite, fs.display(path), inside); err != nil {
 			return Result{}, err
 		}
 
@@ -395,6 +395,8 @@ func (fs *FS) editFile() Tool {
 			replaced = count
 		}
 		return Result{Output: fmt.Sprintf("replaced %d occurrence(s) in %s", replaced, fs.display(path))}, nil
+	}), func(a editFileArgs) (Request, error) {
+		return fs.request("edit_file", AccessWrite, a.Path)
 	})
 }
 
@@ -404,7 +406,7 @@ type listDirArgs struct {
 }
 
 func (fs *FS) listDir() Tool {
-	return Func[listDirArgs](listDirSpec, func(ctx context.Context, a listDirArgs) (Result, error) {
+	return guarded(Func[listDirArgs](listDirSpec, func(ctx context.Context, a listDirArgs) (Result, error) {
 		if err := ctx.Err(); err != nil {
 			return Result{}, err
 		}
@@ -412,11 +414,8 @@ func (fs *FS) listDir() Tool {
 		if arg == "" {
 			arg = "."
 		}
-		path, inside, err := fs.resolve(arg)
+		path, _, err := fs.resolve(arg)
 		if err != nil {
-			return Result{}, err
-		}
-		if err := fs.guard(ctx, "list_dir", AccessRead, fs.display(path), inside); err != nil {
 			return Result{}, err
 		}
 
@@ -465,6 +464,8 @@ func (fs *FS) listDir() Tool {
 			}
 		}
 		return Result{Output: b.String()}, nil
+	}), func(a listDirArgs) (Request, error) {
+		return fs.request("list_dir", AccessRead, a.Path)
 	})
 }
 
@@ -474,15 +475,12 @@ type deleteArgs struct {
 }
 
 func (fs *FS) delete() Tool {
-	return Func[deleteArgs](deleteSpec, func(ctx context.Context, a deleteArgs) (Result, error) {
+	return guarded(Func[deleteArgs](deleteSpec, func(ctx context.Context, a deleteArgs) (Result, error) {
 		if err := ctx.Err(); err != nil {
 			return Result{}, err
 		}
-		path, inside, err := fs.resolve(a.Path)
+		path, _, err := fs.resolve(a.Path)
 		if err != nil {
-			return Result{}, err
-		}
-		if err := fs.guard(ctx, "delete", AccessWrite, fs.display(path), inside); err != nil {
 			return Result{}, err
 		}
 
@@ -499,6 +497,8 @@ func (fs *FS) delete() Tool {
 			return Result{}, err
 		}
 		return Result{Output: "deleted " + fs.display(path)}, nil
+	}), func(a deleteArgs) (Request, error) {
+		return fs.request("delete", AccessWrite, a.Path)
 	})
 }
 
@@ -507,21 +507,20 @@ type mkdirArgs struct {
 }
 
 func (fs *FS) mkdir() Tool {
-	return Func[mkdirArgs](mkdirSpec, func(ctx context.Context, a mkdirArgs) (Result, error) {
+	return guarded(Func[mkdirArgs](mkdirSpec, func(ctx context.Context, a mkdirArgs) (Result, error) {
 		if err := ctx.Err(); err != nil {
 			return Result{}, err
 		}
-		path, inside, err := fs.resolve(a.Path)
+		path, _, err := fs.resolve(a.Path)
 		if err != nil {
-			return Result{}, err
-		}
-		if err := fs.guard(ctx, "mkdir", AccessWrite, fs.display(path), inside); err != nil {
 			return Result{}, err
 		}
 		if err := os.MkdirAll(path, 0o755); err != nil {
 			return Result{}, err
 		}
 		return Result{Output: "created directory " + fs.display(path)}, nil
+	}), func(a mkdirArgs) (Request, error) {
+		return fs.request("mkdir", AccessWrite, a.Path)
 	})
 }
 
