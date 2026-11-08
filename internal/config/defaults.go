@@ -2,13 +2,11 @@ package config
 
 import (
 	"os"
-	"path"
+	"path/filepath"
 )
 
 const (
 	DefaultMaxOutputTokens int = 16384
-
-	DefaultLogLevel string = "info"
 
 	DefaultAgentDirBase string  = ".winky"
 	DefaultTemperature  float64 = 0.7
@@ -22,7 +20,7 @@ func DefaultConfig() *Config {
 			MaxOutputTokens: DefaultMaxOutputTokens,
 		},
 		Agent: AgentConfig{
-			AgentDir:    path.Join(home, DefaultAgentDirBase),
+			AgentDir:    filepath.Join(home, DefaultAgentDirBase),
 			Temperature: DefaultTemperature,
 			Compaction: CompactionConfig{
 				Enabled:          true,
@@ -32,8 +30,7 @@ func DefaultConfig() *Config {
 				MaxSummaryTokens: 1024,
 			},
 		},
-		LogLevel: DefaultLogLevel,
-		Cwd:      mustGetWd(),
+		Cwd: mustGetWd(),
 	}
 }
 

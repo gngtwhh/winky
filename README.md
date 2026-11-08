@@ -71,7 +71,7 @@ Minimal configuration:
 | `provider.contextWindow` | Optional context window override, used for the TUI usage display |
 | `agent.temperature` | Sampling temperature |
 | `agent.compaction` | Automatic context compaction settings; see [Context compaction](#context-compaction) |
-| `agent.agentDir` | Optional session directory root; defaults to `~/.winky` |
+| `agent.agentDir` | Optional session directory root; a leading `~` is expanded, and the default is `~/.winky` |
 | `cwd` | Optional workspace root and `.env` lookup directory; defaults to the current directory |
 
 `catalog.json` maps model names to providers and protocols. Only the `openai-responses` protocol is currently implemented.
