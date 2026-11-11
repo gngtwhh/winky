@@ -3,15 +3,25 @@
 package tool
 
 import (
+	"context"
 	"os"
 	"os/exec"
 	"syscall"
 )
 
+// shellCommand builds the command that runs a shell line. The command is one
+// argument to sh, so nothing between it and the program is re-parsed.
+func shellCommand(ctx context.Context, command string) *exec.Cmd {
+	return exec.CommandContext(ctx, "sh", "-c", command)
+}
+
 // isolateShell puts the command in its own process group and installs the cancel
 // hook that kills the group.
 func isolateShell(cmd *exec.Cmd) {
-	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+	if cmd.SysProcAttr == nil {
+		cmd.SysProcAttr = &syscall.SysProcAttr{}
+	}
+	cmd.SysProcAttr.Setpgid = true
 	cmd.WaitDelay = shellExitGrace
 	cmd.Cancel = func() error { return killShellTree(cmd) }
 }
@@ -28,3 +38,6 @@ func killShellTree(cmd *exec.Cmd) error {
 	}
 	return nil
 }
+
+// decodeOutput is the identity here: the shell writes UTF-8.
+func decodeOutput(s string) string { return s }

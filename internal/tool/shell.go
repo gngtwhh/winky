@@ -5,7 +5,6 @@ import (
 	"errors"
 	"fmt"
 	"os/exec"
-	"runtime"
 	"time"
 
 	"winky/internal/llm"
@@ -77,12 +76,7 @@ func shellDeadline(c Call) time.Duration {
 }
 
 func runShell(ctx context.Context, dir, command string) (Result, error) {
-	var cmd *exec.Cmd
-	if runtime.GOOS == "windows" {
-		cmd = exec.CommandContext(ctx, "cmd", "/C", command)
-	} else {
-		cmd = exec.CommandContext(ctx, "sh", "-c", command)
-	}
+	cmd := shellCommand(ctx, command)
 	cmd.Dir = dir
 	isolateShell(cmd)
 
@@ -91,7 +85,7 @@ func runShell(ctx context.Context, dir, command string) (Result, error) {
 	cmd.Stderr = out
 
 	err := cmd.Run()
-	text := out.Text()
+	text := decodeOutput(out.Text())
 	if dropped := out.Dropped(); dropped > 0 {
 		text = fmt.Sprintf(
 			"[output truncated: kept the last %s of %s]\n%s",
