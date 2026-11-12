@@ -91,6 +91,21 @@ type CompactionSummary struct {
 
 func (e CompactionSummary) Type() string { return "compaction_summary" }
 
+// PromptChanged records one write to the session's system prompt: a section is
+// added or replaced, or removed. It produces no request message, so a compaction
+// range never covers it.
+type PromptChanged struct {
+	baseEvent
+	Source    string    `json:"source"`
+	Slot      string    `json:"slot"`
+	Name      string    `json:"name"`
+	Text      string    `json:"text"`
+	Remove    bool      `json:"remove,omitempty"`
+	Timestamp time.Time `json:"timestamp"`
+}
+
+func (e PromptChanged) Type() string { return "prompt_changed" }
+
 type TurnStart struct {
 	baseEvent
 	Timestamp time.Time `json:"timestamp"`

@@ -85,6 +85,10 @@ func Decode(line []byte) (Event, error) {
 		var e CompactionSummary
 		err = json.Unmarshal(env.Data, &e)
 		ev = e
+	case "prompt_changed":
+		var e PromptChanged
+		err = json.Unmarshal(env.Data, &e)
+		ev = e
 	case "turn_start":
 		var e TurnStart
 		err = json.Unmarshal(env.Data, &e)
@@ -139,6 +143,9 @@ func WithSeq(ev Event, seq int64) Event {
 		e.seq = seq
 		return e
 	case CompactionSummary:
+		e.seq = seq
+		return e
+	case PromptChanged:
 		e.seq = seq
 		return e
 	case TurnStart:

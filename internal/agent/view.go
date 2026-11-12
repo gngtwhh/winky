@@ -4,11 +4,10 @@ import (
 	"fmt"
 
 	"winky/internal/llm"
+	"winky/internal/prompt"
 	"winky/internal/transcript"
 )
 
-// Model-facing closing messages. Every turn with a user message ends with an
-// assistant message, so user messages are never adjacent.
 const (
 	abortedMarker     = "[the previous request was aborted before completion; it is closed]"
 	interruptedMarker = "[the previous request was interrupted before completion]"
@@ -22,30 +21,24 @@ func failedMarker(err string) string {
 	return "[the previous request failed before completion: " + err + "]"
 }
 
-// entry pairs one request message with the sequence of the event that
-// produced it; compaction ranges address those sequences.
 type entry struct {
 	seq int64
 	msg llm.Message
 }
 
-// view is the model-facing state of a session, folded out of the transcript
-// event log. Entries stay ordered by sequence: a compaction summary takes over
-// the sequence of the first entry it replaces.
-//
-// A view is produced only by project, so the live agent and a replay from disk
-// fold the same events and cannot disagree.
+// view is the model-facing state of a session, folded out of the transcript.
+// Entries stay ordered by sequence: a compaction summary takes over the sequence
+// of the first entry it replaces.
 type view struct {
 	entries []entry
-	// turns and steps hold the sequences compaction may cut before: a user
-	// message starts a turn, a step start starts a step.
 	turns   []int64
 	steps   []int64
 	pending map[string]string // tool call ID -> tool name
 	lastSeq int64
 
-	// turnOpen is set by a user message and cleared by a terminal event or an
-	// interruption repair. turnHasAssistant tracks assistant output in the turn.
+	// prompt produces no request message, so compaction never touches it.
+	prompt prompt.State
+
 	turnOpen         bool
 	turnUserSeq      int64
 	turnHasAssistant bool
@@ -55,9 +48,8 @@ func newView() *view {
 	return &view{pending: make(map[string]string)}
 }
 
-// project folds the whole event log into the view it addresses. It is the only
-// producer of a view; anything else that built one would be a second source of
-// truth.
+// project is the only producer of a view; a second producer would be a second
+// source of truth.
 func project(events []transcript.Event) (*view, error) {
 	v := newView()
 	for _, ev := range events {
@@ -68,9 +60,6 @@ func project(events []transcript.Event) (*view, error) {
 	return v, nil
 }
 
-// apply folds one transcript event into the view. Reasoning and turn/step
-// marker events do not become request messages; they exist for audit and
-// grouping.
 func (v *view) apply(ev transcript.Event) error {
 	if ev == nil {
 		return fmt.Errorf("view: nil transcript event")
@@ -87,7 +76,7 @@ func (v *view) apply(ev transcript.Event) error {
 
 	switch e := ev.(type) {
 	case transcript.TurnStart:
-		// A new turn with the previous one still open means it was interrupted.
+		// An open turn here was interrupted.
 		v.repairOpenTurn(ev.Seq())
 		v.pending = make(map[string]string)
 
@@ -126,14 +115,11 @@ func (v *view) apply(ev transcript.Event) error {
 		v.turnHasAssistant = true
 
 	case transcript.AssistantReasoningMessage, transcript.AssistantReasoningSummary:
-		// Reasoning is persisted for auditing but is not part of the
-		// provider-facing request.
+		// Persisted for auditing, never sent.
 
 	case transcript.ToolResult:
 		name, ok := v.pending[e.CallID]
 		if !ok {
-			// An orphan result cannot be paired with a call, so it must not
-			// enter the request.
 			return nil
 		}
 		v.append(ev.Seq(), llm.Message{
@@ -145,7 +131,7 @@ func (v *view) apply(ev transcript.Event) error {
 		delete(v.pending, e.CallID)
 
 	case transcript.StepEnd:
-		// Any call still pending here has no result; Messages answers it.
+		// Calls still pending here have no result; messagesOf answers them.
 		v.pending = make(map[string]string)
 
 	case transcript.TurnEnd:
@@ -178,14 +164,29 @@ func (v *view) apply(ev transcript.Event) error {
 	case transcript.CompactionSummary:
 		v.applyCompaction(e)
 
+	case transcript.PromptChanged:
+		if err := v.applyPromptChange(e); err != nil {
+			return fmt.Errorf("view: prompt change at seq %d: %w", ev.Seq(), err)
+		}
+
 	default:
 		return fmt.Errorf("view: unsupported transcript event %q", ev.Type())
 	}
 	return nil
 }
 
+func (v *view) applyPromptChange(e transcript.PromptChanged) error {
+	slot := prompt.Slot(e.Slot)
+	if e.Remove {
+		return v.prompt.Remove(slot, e.Name)
+	}
+	return v.prompt.Set(slot, e.Name, e.Text)
+}
+
+func (v *view) systemPrompt() string { return v.prompt.Render() }
+
 // repairOpenTurn closes a turn that never received a terminal event. The marker
-// takes the triggering event's seq, keeping it ordered immediately before it.
+// takes the triggering event's seq, so it stays ordered just before it.
 func (v *view) repairOpenTurn(seq int64) {
 	if !v.turnOpen {
 		return
@@ -198,22 +199,18 @@ func (v *view) repairOpenTurn(seq int64) {
 	v.closeTurn()
 }
 
-// closeTurn clears turn state only. applyCompaction uses it too, and the tool
-// group may still be live after the replaced prefix, so pending is untouched.
+// closeTurn clears turn state only: the tool group may still be live after a
+// compacted prefix, so pending is left alone.
 func (v *view) closeTurn() {
 	v.turnOpen = false
 	v.turnUserSeq = 0
 	v.turnHasAssistant = false
 }
 
-// append records one message under seq, the sequence of the event that
-// produced it.
 func (v *view) append(seq int64, msg llm.Message) {
 	v.entries = append(v.entries, entry{seq: seq, msg: msg})
 }
 
-// appendAssistant appends an assistant message, merging into a preceding
-// text-only assistant to avoid adjacency. Tool calls are always registered.
 func (v *view) appendAssistant(seq int64, msg llm.Message) {
 	for _, tc := range msg.ToolCalls {
 		v.pending[tc.ID] = tc.Name
@@ -235,9 +232,9 @@ func (v *view) appendAssistant(seq int64, msg llm.Message) {
 }
 
 // applyCompaction replaces the entries addressed by the event with its summary.
-// planCompaction always starts a range at the first entry and cuts on a turn or
-// step boundary, so a range is a prefix that cannot split a tool-call group; a
-// range matching no entry is ignored.
+// planCompaction always starts at the first entry and cuts on a turn or step
+// boundary, so the range is a prefix that cannot split a tool-call group. A range
+// matching no entry is ignored.
 func (v *view) applyCompaction(e transcript.CompactionSummary) {
 	start, end := e.ReplacedStartSeq, e.ReplacedEndSeq
 
@@ -264,7 +261,6 @@ func (v *view) applyCompaction(e transcript.CompactionSummary) {
 	}
 }
 
-// trimUnits drops the boundaries that the replaced range covered.
 func (v *view) trimUnits(end int64) {
 	v.turns = trimSeqs(v.turns, end)
 	v.steps = trimSeqs(v.steps, end)
@@ -281,13 +277,10 @@ func trimSeqs(seqs []int64, end int64) []int64 {
 	return seqs[i:]
 }
 
-// parts exposes the view for planning; the slices are read-only.
 func (v *view) parts() (entries []entry, turns, steps []int64) {
 	return v.entries, v.turns, v.steps
 }
 
-// messages returns the request-safe view: missing tool results answered, orphan
-// results dropped, adjacent assistants merged.
 func (v *view) messages() []llm.Message {
 	return messagesOf(v.entries)
 }
@@ -297,7 +290,6 @@ func messagesOf(entries []entry) []llm.Message {
 	for i := 0; i < len(entries); {
 		msg := entries[i].msg
 		if msg.Role == llm.RoleToolOutput {
-			// Orphan tool output; valid groups are consumed below.
 			i++
 			continue
 		}
@@ -348,8 +340,8 @@ func messagesOf(entries []entry) []llm.Message {
 	return mergeAdjacentAssistants(out)
 }
 
-// mergeAdjacentAssistants is the last compatibility gate. Tool-call groups are
-// followed by results, so only text-only assistants can be adjacent here.
+// mergeAdjacentAssistants is the last compatibility gate: a tool-call group is
+// followed by its results, so only text-only assistants can be adjacent here.
 func mergeAdjacentAssistants(msgs []llm.Message) []llm.Message {
 	out := make([]llm.Message, 0, len(msgs))
 	for _, msg := range msgs {
