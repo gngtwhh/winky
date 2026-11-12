@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"winky/internal/llm"
+	"winky/internal/prompt"
 	"winky/internal/schema"
 	"winky/internal/tool"
 	"winky/internal/transcript"
@@ -40,7 +41,7 @@ const (
 type Agent struct {
 	streamer        llm.Streamer
 	model           string
-	systemPrompt    string
+	initialPrompt   string
 	temperature     float64
 	maxOutputTokens int
 	tools           Toolset
@@ -78,9 +79,10 @@ func WithModel(name string) Option {
 	return func(a *Agent) { a.model = name }
 }
 
-// WithSystemPrompt sets a system prompt (sent as model instructions).
-func WithSystemPrompt(prompt string) Option {
-	return func(a *Agent) { a.systemPrompt = prompt }
+// WithInitialSystemPrompt seeds the system prompt of a new session. A session
+// that already records one keeps it, so resuming ignores this.
+func WithInitialSystemPrompt(text string) Option {
+	return func(a *Agent) { a.initialPrompt = text }
 }
 
 // WithTemperature sets the sampling temperature.
@@ -113,7 +115,7 @@ func New(streamer llm.Streamer, opts ...Option) *Agent {
 	}
 	a.normalizeCompaction()
 	if a.tools != nil {
-		a.toolTokens = estimateTools(a.tools)
+		a.toolTokens = estimateToolTokens(a.tools)
 	}
 	a.events = make(chan schema.Event, 32)
 	if a.tsRecorder == nil {
@@ -192,7 +194,7 @@ func (a *Agent) Turn(ctx context.Context, input string) (Turn, error) {
 		req := llm.Request{
 			Model:           a.model,
 			Messages:        v.messages(),
-			SystemPrompt:    a.systemPrompt,
+			SystemPrompt:    v.systemPrompt(),
 			Temperature:     a.temperature,
 			MaxOutputTokens: a.maxOutputTokens,
 		}
@@ -366,19 +368,34 @@ func (a *Agent) loadLog() error {
 	}
 	if a.tsRecorder == nil {
 		a.logLoaded = true
-		return nil
+		return a.seedPrompt(newView())
 	}
 
 	events, err := a.tsRecorder.ReadAll()
 	if err != nil {
 		return fmt.Errorf("read transcript: %w", err)
 	}
-	if _, err := project(events); err != nil {
+	v, err := project(events)
+	if err != nil {
 		return fmt.Errorf("replay transcript: %w", err)
 	}
 	a.log = events
 	a.logLoaded = true
-	return nil
+	return a.seedPrompt(v)
+}
+
+// seedPrompt records the initial prompt as the base section of a session that
+// has none.
+func (a *Agent) seedPrompt(v *view) error {
+	if a.initialPrompt == "" || v.prompt.Has(prompt.SlotBase) {
+		return nil
+	}
+	return a.record(transcript.PromptChanged{
+		Source: "startup",
+		Slot:   string(prompt.SlotBase),
+		Name:   prompt.BaseName,
+		Text:   a.initialPrompt,
+	})
 }
 
 // recordStep writes the reasoning, reasoning summary, and assistant output

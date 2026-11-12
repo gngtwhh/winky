@@ -20,6 +20,7 @@ import (
 	"winky/internal/llm"
 	"winky/internal/llm/api"
 	"winky/internal/llm/model"
+	"winky/internal/prompt"
 	"winky/internal/session"
 	"winky/internal/tool"
 	"winky/internal/transcript"
@@ -30,7 +31,7 @@ import (
 func main() {
 	configPath := flag.String("config", "", "path to config.json (default: defaults + .env)")
 	catalogPath := flag.String("catalog", "catalog.json", "path to model catalog.json")
-	promptPath := flag.String("prompt", "", "path to a system prompt file (default: none)")
+	promptPath := flag.String("prompt", "", "path to a system prompt file (default: the built-in prompt)")
 	resume := flag.Bool("r", false, "choose a previous session started in the current directory")
 	flag.Parse()
 
@@ -147,13 +148,10 @@ func main() {
 	}
 }
 
-// newAgent builds the conversational agent, loading the optional system prompt
-// file named on the command line; an empty or blank file means no prompt.
-//
-// The prompt is sent as model instructions on every turn. As the one stable
-// prefix the conversation always repeats, it is also what makes provider-side
-// prompt caching pay off: a short chat never reaches the minimum cacheable
-// prefix, and its cache rate then stays at "—" for the whole session.
+// newAgent builds the conversational agent. The system prompt comes from the
+// -prompt file when one is given, and from the built-in default otherwise; an
+// empty or blank file means no prompt. The prompt seeds a new session: a resumed
+// session sends the one it recorded.
 func newAgent(streamer llm.Streamer, cfg *config.Config, promptPath string, tools agent.Toolset, rec transcript.Recorder, contextWindow int) (*agent.Agent, error) {
 	maxOutputTokens := cfg.Provider.MaxOutputTokens
 	if maxOutputTokens <= 0 {
@@ -183,14 +181,16 @@ func newAgent(streamer llm.Streamer, cfg *config.Config, promptPath string, tool
 		opts = append(opts, agent.WithTranscriptRecorder(rec))
 	}
 
+	initial := prompt.DefaultSystemPrompt
 	if promptPath != "" {
-		prompt, err := readSystemPrompt(promptPath)
+		text, err := readSystemPrompt(promptPath)
 		if err != nil {
 			return nil, err
 		}
-		if prompt != "" {
-			opts = append(opts, agent.WithSystemPrompt(prompt))
-		}
+		initial = text
+	}
+	if initial != "" {
+		opts = append(opts, agent.WithInitialSystemPrompt(initial))
 	}
 
 	return agent.New(streamer, opts...), nil

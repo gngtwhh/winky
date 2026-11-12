@@ -118,8 +118,10 @@ func (a *Agent) keepBudget() int {
 	return budget
 }
 
-func (a *Agent) estimateRequest(msgs []llm.Message) int {
-	return 8 + estimateMessages(msgs) + estimateText(a.systemPrompt) + a.toolTokens
+// estimateRequestTokens sums what a request costs: framing, messages, the system
+// prompt and the tool schemas.
+func (a *Agent) estimateRequestTokens(sysTokens int, msgs []llm.Message) int {
+	return 8 + estimateMessageTokens(msgs) + sysTokens + a.toolTokens
 }
 
 // maybeCompact summarizes the oldest entries of the view when the next request
@@ -137,7 +139,7 @@ func (a *Agent) maybeCompact(ctx context.Context, hard bool) error {
 	if err != nil {
 		return err
 	}
-	before := a.estimateContext(v, s)
+	before := a.estimateContextTokens(v, s)
 	if before < limit {
 		return nil
 	}
@@ -191,7 +193,7 @@ func (a *Agent) Compact(ctx context.Context) (bool, error) {
 	if err != nil || !ok {
 		return false, err
 	}
-	before := a.estimateContext(v, s)
+	before := a.estimateContextTokens(v, s)
 	summary, usage, err := a.summarize(ctx, plan.replaced)
 	if err != nil {
 		if cerr := ctx.Err(); cerr != nil {
@@ -209,7 +211,7 @@ func (a *Agent) Compact(ctx context.Context) (bool, error) {
 // current context, so the command actually shrinks it instead of leaving almost
 // everything in place.
 func (a *Agent) manualKeepBudget(v *view, s stats) int {
-	budget := a.estimateContext(v, s) / 4
+	budget := a.estimateContextTokens(v, s) / 4
 	if budget < minKeepTokens {
 		budget = minKeepTokens
 	}
@@ -218,7 +220,7 @@ func (a *Agent) manualKeepBudget(v *view, s stats) int {
 
 // recordCompaction persists one compaction event and reports the new size.
 func (a *Agent) recordCompaction(plan compactionPlan, before int, summary, kind string, usage llm.TokenUsage) error {
-	after := before - estimateMessages(plan.replaced) + estimateText(summary)
+	after := before - estimateMessageTokens(plan.replaced) + estimateTokens(summary)
 	if after < 0 {
 		after = 0
 	}
@@ -285,7 +287,7 @@ func (a *Agent) planCompaction(v *view, keepBudget int) (compactionPlan, bool, e
 // acceptedCut rejects a cut that replaces nothing or keeps more than twice the
 // budget, which would trigger again immediately.
 func acceptedCut(entries []entry, kept, keepBudget int) bool {
-	return kept > 0 && kept < len(entries) && estimateEntries(entries[kept:]) <= 2*keepBudget
+	return kept > 0 && kept < len(entries) && estimateEntryTokens(entries[kept:]) <= 2*keepBudget
 }
 
 func newPlan(entries []entry, kept int) compactionPlan {
@@ -329,7 +331,7 @@ func pickTail(entries []entry, units []unit, keepBudget int) int {
 	tokens := 0
 	for i := len(units) - 1; i >= 0; i-- {
 		u := units[i]
-		t := estimateEntries(entries[u.first : u.last+1])
+		t := estimateEntryTokens(entries[u.first : u.last+1])
 		if tokens > 0 && tokens+t > keepBudget {
 			break
 		}
@@ -420,9 +422,9 @@ func truncateSummary(s string, maxTokens int) string {
 	return s[:cut]
 }
 
-// estimateText counts ASCII at four bytes per token and every non-ASCII rune as
+// estimateTokens counts ASCII at four bytes per token and every non-ASCII rune as
 // one token, which is close for CJK.
-func estimateText(s string) int {
+func estimateTokens(s string) int {
 	if s == "" {
 		return 0
 	}
@@ -437,32 +439,32 @@ func estimateText(s string) int {
 	return (ascii+3)/4 + wide
 }
 
-func estimateMessages(msgs []llm.Message) int {
+func estimateMessageTokens(msgs []llm.Message) int {
 	total := 0
 	for _, m := range msgs {
-		total += 4 + estimateText(m.Content) + estimateText(m.Name)
+		total += 4 + estimateTokens(m.Content) + estimateTokens(m.Name)
 		for _, tc := range m.ToolCalls {
-			total += 4 + estimateText(tc.Name) + estimateText(tc.Arguments)
+			total += 4 + estimateTokens(tc.Name) + estimateTokens(tc.Arguments)
 		}
 	}
 	return total
 }
 
-func estimateEntries(entries []entry) int {
-	return estimateMessages(messagesOf(entries))
+func estimateEntryTokens(entries []entry) int {
+	return estimateMessageTokens(messagesOf(entries))
 }
 
-// estimateTools counts the tool schemas, which are sent on every request but
+// estimateToolTokens counts the tool schemas, which are sent on every request but
 // never appear in Messages.
-func estimateTools(toolset Toolset) int {
+func estimateToolTokens(toolset Toolset) int {
 	if toolset == nil {
 		return 0
 	}
 	total := 0
 	for _, spec := range toolset.Specs() {
-		total += 16 + estimateText(spec.Name) + estimateText(spec.Description)
+		total += 16 + estimateTokens(spec.Name) + estimateTokens(spec.Description)
 		if data, err := json.Marshal(spec.Parameters); err == nil {
-			total += estimateText(string(data))
+			total += estimateTokens(string(data))
 		}
 	}
 	return total

@@ -15,7 +15,7 @@ The project is early-stage and focuses on the agent loop, tool permissions, and 
 - The model-facing view is projected from the transcript on every request
 - Automatic context compaction with a summarized handover
 - Model catalog and OpenAI Responses-compatible client
-- Optional system prompt and token/context usage display
+- Built-in system prompt, overridable with `-prompt`, and token/context usage display
 
 ## Requirements
 
@@ -95,7 +95,7 @@ Command-line flags:
 | --- | --- | --- |
 | `-config` | empty | Path to the config file. Without it, defaults are used and `provider.model` still needs to be set |
 | `-catalog` | `catalog.json` | Path to the model catalog |
-| `-prompt` | empty | Optional system prompt file |
+| `-prompt` | built-in | System prompt file, replacing the built-in one |
 | `-r` | false | Choose a previous session started in the current directory and continue it |
 
 When running from another directory, pass `-catalog` with the correct path.
@@ -161,6 +161,19 @@ Key bindings:
 | `Ctrl+C` | Quit |
 | `PgUp` / `PgDn` | Scroll |
 | `Ctrl+T` | Expand or collapse all reasoning |
+
+## System prompt
+
+Every request carries a system prompt, sent as the `instructions` field. A new
+session starts from the built-in one, `internal/prompt/default_system_prompt.md`,
+which is embedded in the binary.
+
+- `-prompt <file>` replaces it for a new session. An empty or blank file means no
+  system prompt at all.
+- The prompt is recorded in the transcript as a `prompt_changed` event, so a
+  resumed session sends the prompt it recorded and `-prompt` is ignored for it.
+- The prompt is the stable prefix provider-side prompt caching relies on, so
+  changing it mid-session costs one cache miss.
 
 ## Session data
 
@@ -252,6 +265,7 @@ internal/llm/               request/response types and OpenAI Responses client
 internal/llm/api/           provider adapters
 internal/tool/              filesystem, shell, web tools and permission policy
 internal/tui/               Bubble Tea UI
+internal/prompt/            system prompt state, its rendering, and the built-in default
 internal/schema/            shared UI events and Turn types
 internal/session/           session directory and meta.json
 internal/transcript/        transcript events and codec
@@ -269,8 +283,6 @@ go test ./...
 ## Current limitations
 
 - Only the `openai-responses` protocol is supported; other protocols in `catalog.json` are not wired up.
-- Only new sessions are supported, with no resume.
 - Compaction keeps the whole conversation on disk: it changes what is sent, not `transcript.jsonl`.
 - Compaction only cuts at turn or step boundaries, so a request that is still too large after compacting fails with an error instead of dropping context silently.
-- The transcript writer assumes a single process; there is no file locking.
 - The project is early-stage, so APIs and behavior may change.

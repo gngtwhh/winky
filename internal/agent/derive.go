@@ -14,11 +14,18 @@ type stats struct {
 	// total is every request the session paid for: each StepEnd, plus the
 	// summarizing calls a CompactionSummary carries.
 	total llm.TokenUsage
-	// prompt is the prompt size the provider measured at the anchor, and
-	// fromView is what the local estimator said about that same request. Their
+
+	// measured is the provider's input token count for the anchored request, and
+	// estimated is what the local estimator said about that same request. Their
 	// difference is the estimator's bias, carried forward by later estimates.
-	prompt   int
-	fromView int
+	measured  int
+	estimated int
+
+	// systemPromptTokens is the system prompt's local size at the anchor. The
+	// system prompt can grow afterwards, so the estimate above must keep the one
+	// the request actually carried.
+	systemPromptTokens int
+
 	anchored bool
 }
 
@@ -49,7 +56,8 @@ func (a *Agent) derive() (*view, stats, error) {
 			}
 			s.total = s.total.Add(llmUsage(*e.Usage))
 			if e.Usage.PromptTokens > 0 {
-				s.prompt, s.anchored, fromFold = e.Usage.PromptTokens, true, false
+				s.measured, s.anchored, fromFold = e.Usage.PromptTokens, true, false
+				s.systemPromptTokens = estimateTokens(v.systemPrompt())
 				anchorSeq = stepSeq
 			}
 
@@ -63,14 +71,18 @@ func (a *Agent) derive() (*view, stats, error) {
 			// anchor; without it there is no measurement to anchor on.
 			s.anchored = false
 			if e.TokensAfter > 0 {
-				s.prompt, s.anchored, fromFold = e.TokensAfter, true, true
+				s.measured, s.anchored, fromFold = e.TokensAfter, true, true
+				s.systemPromptTokens = estimateTokens(v.systemPrompt())
 				anchorAt = len(v.entries)
 			}
 		}
 	}
 
 	if s.anchored {
-		s.fromView = a.estimateRequest(messagesOf(anchorEntries(v, fromFold, anchorSeq, anchorAt)))
+		s.estimated = a.estimateRequestTokens(
+			s.systemPromptTokens,
+			messagesOf(anchorEntries(v, fromFold, anchorSeq, anchorAt)),
+		)
 	}
 	return v, s, nil
 }
@@ -99,16 +111,16 @@ func anchorEntries(v *view, fromFold bool, stepSeq int64, anchorAt int) []entry 
 	return v.entries[:i]
 }
 
-// estimateContext estimates the prompt size of the next request: the last size
-// the provider measured, plus the growth the local estimator has seen since.
+// estimateContextTokens estimates the input token count of the next request: the
+// last count the provider measured, plus the growth seen since.
 // Only the estimator's change is trusted; its absolute value is not, because it
 // counts code and JSON at the density of prose.
-func (a *Agent) estimateContext(v *view, s stats) int {
-	est := a.estimateRequest(v.messages())
+func (a *Agent) estimateContextTokens(v *view, s stats) int {
+	est := a.estimateRequestTokens(estimateTokens(v.systemPrompt()), v.messages())
 	if !s.anchored {
 		return est
 	}
-	est = s.prompt + est - s.fromView
+	est = s.measured + est - s.estimated
 	if est < 0 {
 		return 0
 	}

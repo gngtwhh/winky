@@ -1,17 +1,27 @@
 package prompt
 
 import (
+	_ "embed"
 	"errors"
 	"fmt"
 	"sort"
 	"strings"
 )
 
+//go:embed default_system_prompt.md
+var embeddedDefault string
+
+// DefaultSystemPrompt is the prompt a new session starts with when the -prompt
+// flag is not given.
+var DefaultSystemPrompt = strings.TrimSpace(embeddedDefault)
+
 // Slot orders sections in the rendered prompt. It reaches the transcript as a
 // string, so a value must never be renamed; add new ones instead.
 type Slot string
 
 const SlotBase Slot = "base"
+
+const BaseName = "base"
 
 const (
 	separator       = "\n\n"
