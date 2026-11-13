@@ -15,7 +15,7 @@ The project is early-stage and focuses on the agent loop, tool permissions, and 
 - The model-facing view is projected from the transcript on every request
 - Automatic context compaction with a summarized handover
 - Model catalog and OpenAI Responses-compatible client
-- Built-in system prompt, overridable with `-prompt`, and token/context usage display
+- Built-in system prompt, overridable with `--prompt`, and token/context usage display
 
 ## Requirements
 
@@ -79,26 +79,28 @@ Minimal configuration:
 ## Run
 
 ```bash
-go run ./cmd/tui -config config.json
+go run ./cmd/tui --config config.json
 ```
 
 Or build first:
 
 ```bash
 go build -o winky ./cmd/tui
-./winky -config config.json
+./winky --config config.json
 ```
 
 Command-line flags:
 
 | Flag | Default | Description |
 | --- | --- | --- |
-| `-config` | empty | Path to the config file. Without it, defaults are used and `provider.model` still needs to be set |
-| `-catalog` | `catalog.json` | Path to the model catalog |
-| `-prompt` | built-in | System prompt file, replacing the built-in one |
-| `-r` | false | Choose a previous session started in the current directory and continue it |
+| `--config` | empty | Path to the config file. Without it, defaults are used and `provider.model` still needs to be set |
+| `--catalog` | `catalog.json` | Path to the model catalog |
+| `--prompt` | built-in | System prompt file, replacing the built-in one |
+| `-r`, `--resume` | false | Choose a previous session started in the current directory and continue it |
 
-When running from another directory, pass `-catalog` with the correct path.
+When running from another directory, pass `--catalog` with the correct path.
+
+The legacy single-dash spellings (`-config`, `-catalog`, `-prompt`) are still accepted.
 
 ## Usage
 
@@ -168,10 +170,10 @@ Every request carries a system prompt, sent as the `instructions` field. A new
 session starts from the built-in one, `internal/prompt/default_system_prompt.md`,
 which is embedded in the binary.
 
-- `-prompt <file>` replaces it for a new session. An empty or blank file means no
+- `--prompt <file>` replaces it for a new session. An empty or blank file means no
   system prompt at all.
 - The prompt is recorded in the transcript as a `prompt_changed` event, so a
-  resumed session sends the prompt it recorded and `-prompt` is ignored for it.
+  resumed session sends the prompt it recorded and `--prompt` is ignored for it.
 - The prompt is the stable prefix provider-side prompt caching relies on, so
   changing it mid-session costs one cache miss.
 
@@ -259,7 +261,8 @@ kept verbatim.
 ## Project layout
 
 ```text
-cmd/tui/                    entry point and agent wiring
+cmd/tui/                    entry point
+internal/cli/               cobra command, startup flags, and agent wiring
 internal/agent/             agent loop, view projection, compaction, and the tool-call supervisor
 internal/llm/               request/response types and OpenAI Responses client
 internal/llm/api/           provider adapters
