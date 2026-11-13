@@ -1,11 +1,9 @@
-// Package tool defines the tool surface an Agent exposes to the model: the
-// descriptions sent in llm.Request.Tools and the local implementations that run
-// when the model calls one.
+// Package tool defines the tool surface an Agent exposes to the model: the Tool
+// interface, the Registry that runs calls, and the permission policy.
 //
-// A Tool is provider-independent. It produces an llm.ToolSpec for the request
-// and consumes a Call carrying the raw JSON arguments the provider returned.
-// Everything above this layer (the agent loop, the TUI) talks to a Registry and
-// never to a concrete tool.
+// A Tool is provider-independent. It exposes an llm.ToolSpec and consumes a
+// Call carrying the provider's raw JSON arguments. The built-in tools live in
+// internal/tool/default_tool.
 package tool
 
 import (
@@ -23,19 +21,15 @@ type Tool interface {
 	// Spec describes the tool to the model.
 	Spec() llm.ToolSpec
 
-	// Invoke runs one call. The returned error reports that the tool could not
-	// run at all (bad arguments, missing file, escaping path); the caller turns
-	// it into an error result for the model. A tool that ran but failed
-	// semantically should instead return Result{IsError: true} carrying output
-	// the model can act on.
+	// Invoke runs one call. An error means the tool could not run at all, for
+	// example because of bad arguments or a missing file. A call that ran but
+	// failed semantically should return Result{IsError: true} instead, with
+	// output the model can act on.
 	Invoke(ctx context.Context, call Call) (Result, error)
 }
 
-// Call is one model-issued tool invocation.
-//
-// ID is the call_id the matching tool output must be rounded-trip back with.
-// Arguments is the raw JSON string exactly as the provider produced it: decoding
-// belongs to the tool, so the protocol layer never needs tool-specific types.
+// Call is one model-issued tool invocation. Arguments is the raw JSON exactly
+// as the provider produced it; each tool decodes it itself.
 type Call struct {
 	ID        string
 	Name      string
@@ -43,22 +37,18 @@ type Call struct {
 }
 
 // Result is a tool's answer for one Call. Output is sent to the model verbatim
-// as the function_call_output content, so it should be concise and
-// self-contained: whatever the model needs to decide the next step.
+// as the function_call_output content.
 type Result struct {
 	Output  string
 	IsError bool
-	// Aborted reports that the tool stopped because the context was cancelled;
+	// Aborted reports that the call stopped because its context was cancelled;
 	// the agent replaces the output with an aborted marker.
 	Aborted bool
 }
 
 // Func adapts a typed handler into a Tool. Arguments are decoded from JSON into
 // T before the handler runs; empty or null arguments decode to T's zero value.
-//
-// Decoding lives here so every tool gets the same treatment of malformed input:
-// a decode failure is an error, which the agent reports to the model as an error
-// result instead of failing the turn.
+// A decode failure is returned as an error.
 func Func[T any](spec llm.ToolSpec, fn func(context.Context, T) (Result, error)) Tool {
 	return &funcTool[T]{spec: spec, fn: fn}
 }
@@ -71,94 +61,102 @@ type funcTool[T any] struct {
 func (f *funcTool[T]) Spec() llm.ToolSpec { return f.spec }
 
 func (f *funcTool[T]) Invoke(ctx context.Context, call Call) (Result, error) {
-	args, err := decodeArgs[T](call)
+	args, err := DecodeArgs[T](call)
 	if err != nil {
 		return Result{}, err
 	}
 	return f.fn(ctx, args)
 }
 
-// Sequenced marks a tool whose calls must run one at a time, in issue order,
-// rather than concurrently with sibling calls in the same step.
+// Sequenced marks a tool that must run alone, in issue order.
 type Sequenced interface{ Sequential() bool }
 
-// Budgeted reports how long one call may run. The runner enforces it: it cancels
-// the call's context when the budget is spent, which the tool is expected to
-// honour by returning the output it already produced.
-//
-// A zero duration means "no declared budget": the runner falls back to its own
-// ceiling. Tools that have no meaningful slow path can leave it at zero; tools
-// whose call may legitimately take minutes (shell, web) should declare it,
-// usually from their own arguments.
+// Budgeted reports how long one call may run. The runner cancels the call when
+// the budget is spent. A zero duration means no declared budget, so the
+// runner's own ceiling applies.
 type Budgeted interface {
 	Deadline(c Call) time.Duration
 }
 
 // Guarded reports the permission a call needs. The runner asks before the call
-// starts, so the time a user spends deciding is not billed to the call's budget
-// or its elapsed time, and a refused call never runs at all.
-//
-// The returned Request's Tool field names the operation. An empty Request means
-// the call needs no permission.
+// starts, so a refused call never runs. An empty Request means no permission is
+// required.
 type Guarded interface {
 	PolicyRequest(c Call) (Request, error)
 }
 
-// budgeted attaches a declared budget to a tool.
-func budgeted(t Tool, deadline func(Call) time.Duration) Tool {
-	return budgetedTool{Tool: t, deadline: deadline}
-}
-
-type budgetedTool struct {
+// capableTool decorates a Tool with any combination of the optional interfaces
+// above. Capabilities fall through to the wrapped tool when not overridden, so
+// wrappers compose in any order.
+type capableTool struct {
 	Tool
-	deadline func(Call) time.Duration
+	sequential bool
+	deadline   func(Call) time.Duration
+	request    func(Call) (Request, error)
 }
 
-func (b budgetedTool) Deadline(c Call) time.Duration { return b.deadline(c) }
-
-// PolicyRequest forwards the inner capability: a wrapper only implements the one
-// it adds, so it must not drop the others on the floor.
-func (b budgetedTool) PolicyRequest(c Call) (Request, error) { return policyRequestOf(b.Tool, c) }
-
-// guarded attaches a permission request builder to a tool.
-func guarded[T any](t Tool, request func(T) (Request, error)) Tool {
-	return guardedTool[T]{Tool: t, request: request}
+func (t capableTool) Sequential() bool {
+	return t.sequential || sequencedOf(t.Tool)
 }
 
-type guardedTool[T any] struct {
-	Tool
-	request func(T) (Request, error)
-}
-
-func (g guardedTool[T]) PolicyRequest(c Call) (Request, error) {
-	args, err := decodeArgs[T](c)
-	if err != nil {
-		return Request{}, err
+func (t capableTool) Deadline(call Call) time.Duration {
+	if t.deadline != nil {
+		return t.deadline(call)
 	}
-	return g.request(args)
+	return deadlineOf(t.Tool, call)
 }
 
-// sequenced wraps a tool to mark it sequential.
-func sequenced(t Tool) Tool { return sequencedTool{t} }
+func (t capableTool) PolicyRequest(call Call) (Request, error) {
+	if t.request != nil {
+		return t.request(call)
+	}
+	return policyRequestOf(t.Tool, call)
+}
 
-type sequencedTool struct{ Tool }
+// WithSequential marks a tool's calls as ordered.
+func WithSequential(t Tool) Tool {
+	return capableTool{Tool: t, sequential: true}
+}
 
-func (sequencedTool) Sequential() bool { return true }
+// WithBudget attaches a declared call budget.
+func WithBudget(t Tool, deadline func(Call) time.Duration) Tool {
+	return capableTool{Tool: t, deadline: deadline}
+}
 
-// PolicyRequest forwards the inner capability, as budgetedTool does.
-func (s sequencedTool) PolicyRequest(c Call) (Request, error) { return policyRequestOf(s.Tool, c) }
+// WithGuard attaches a permission request built from the call's decoded
+// arguments.
+func WithGuard[T any](t Tool, request func(T) (Request, error)) Tool {
+	return capableTool{Tool: t, request: func(call Call) (Request, error) {
+		args, err := DecodeArgs[T](call)
+		if err != nil {
+			return Request{}, err
+		}
+		return request(args)
+	}}
+}
 
-// policyRequestOf asks a tool for the permission its call needs.
-func policyRequestOf(t Tool, c Call) (Request, error) {
+func sequencedOf(t Tool) bool {
+	s, ok := t.(Sequenced)
+	return ok && s.Sequential()
+}
+
+func deadlineOf(t Tool, call Call) time.Duration {
+	if b, ok := t.(Budgeted); ok {
+		return b.Deadline(call)
+	}
+	return 0
+}
+
+func policyRequestOf(t Tool, call Call) (Request, error) {
 	if g, ok := t.(Guarded); ok {
-		return g.PolicyRequest(c)
+		return g.PolicyRequest(call)
 	}
 	return Request{}, nil
 }
 
-// decodeArgs decodes a call's raw JSON arguments into T. Empty arguments (a tool
+// DecodeArgs decodes a call's raw JSON arguments into T. Empty arguments (a tool
 // that takes none) and an explicit null both decode to the zero value.
-func decodeArgs[T any](call Call) (T, error) {
+func DecodeArgs[T any](call Call) (T, error) {
 	var args T
 	raw := strings.TrimSpace(call.Arguments)
 	if raw == "" || raw == "null" {

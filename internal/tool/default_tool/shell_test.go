@@ -1,4 +1,4 @@
-package tool
+package defaulttool
 
 import (
 	"context"
@@ -8,6 +8,8 @@ import (
 	"testing"
 	"time"
 	"unicode/utf8"
+
+	"winky/internal/tool"
 )
 
 func itoa(n int) string { return strconv.Itoa(n) }
@@ -78,7 +80,7 @@ func TestShellDeadlineReadsTheArgument(t *testing.T) {
 		{`not json`, 0},
 	}
 	for _, tc := range tests {
-		got := shellDeadline(Call{Name: "shell", Arguments: tc.args})
+		got := shellDeadline(tool.Call{Name: "shell", Arguments: tc.args})
 		if int(got.Seconds()) != tc.want {
 			t.Fatalf("shellDeadline(%s) = %v, want %ds", tc.args, got, tc.want)
 		}
@@ -87,9 +89,9 @@ func TestShellDeadlineReadsTheArgument(t *testing.T) {
 
 func TestShellRunsAndReportsFailure(t *testing.T) {
 	dir := t.TempDir()
-	sh := shell(NewPolicy(FullAccess), dir)
+	sh := shell(tool.NewPolicy(tool.FullAccess), dir)
 
-	ok, err := sh.Invoke(t.Context(), Call{
+	ok, err := sh.Invoke(t.Context(), tool.Call{
 		Name: "shell", Arguments: `{"command":"` + echoCommand("hi") + `"}`,
 	})
 	if err != nil {
@@ -99,7 +101,7 @@ func TestShellRunsAndReportsFailure(t *testing.T) {
 		t.Fatalf("result = %+v, want hi", ok)
 	}
 
-	bad, err := sh.Invoke(t.Context(), Call{
+	bad, err := sh.Invoke(t.Context(), tool.Call{
 		Name: "shell", Arguments: `{"command":"` + exitCommand(3) + `"}`,
 	})
 	if err != nil {
@@ -113,13 +115,13 @@ func TestShellRunsAndReportsFailure(t *testing.T) {
 // A cancelled command must stop promptly: without killing the process tree the
 // call would keep waiting for a command that is still running.
 func TestShellCancelKillsTheCommand(t *testing.T) {
-	sh := shell(NewPolicy(FullAccess), t.TempDir())
+	sh := shell(tool.NewPolicy(tool.FullAccess), t.TempDir())
 
 	ctx, cancel := context.WithTimeout(context.Background(), 200*time.Millisecond)
 	defer cancel()
 
 	start := time.Now()
-	res, err := sh.Invoke(ctx, Call{
+	res, err := sh.Invoke(ctx, tool.Call{
 		Name: "shell", Arguments: `{"command":"` + hangCommand() + `"}`,
 	})
 	elapsed := time.Since(start)
@@ -139,10 +141,10 @@ func TestShellCancelKillsTheCommand(t *testing.T) {
 func TestShellDoesNotWaitForDetachedDescendants(t *testing.T) {
 	// The working directory is the system temp dir, not t.TempDir(): the detached
 	// descendant keeps it as its cwd and would block the cleanup.
-	sh := shell(NewPolicy(FullAccess), os.TempDir())
+	sh := shell(tool.NewPolicy(tool.FullAccess), os.TempDir())
 
 	start := time.Now()
-	if _, err := sh.Invoke(t.Context(), Call{
+	if _, err := sh.Invoke(t.Context(), tool.Call{
 		Name: "shell", Arguments: `{"command":"` + detachedCommand() + `"}`,
 	}); err != nil {
 		t.Fatalf("Invoke: %v", err)

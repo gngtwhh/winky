@@ -1,6 +1,6 @@
 //go:build windows
 
-package tool
+package defaulttool
 
 // echoCommand returns a shell command that prints hi.
 func echoCommand(text string) string { return "echo " + text }

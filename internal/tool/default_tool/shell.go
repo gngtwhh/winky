@@ -1,4 +1,4 @@
-package tool
+package defaulttool
 
 import (
 	"context"
@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"winky/internal/llm"
+	"winky/internal/tool"
 )
 
 // maxShellBytes is how much command output is kept for the model. The tail is
@@ -48,17 +49,17 @@ type shellArgs struct {
 // tree: the shell is only an intermediate, and the process that actually does
 // the work is its child. Killing just the shell would leave the work running and
 // leave the output pipe open, which is how a cancelled call used to hang.
-func shell(_ *Policy, dir string) Tool {
-	return budgeted(
-		guarded(
-			Func[shellArgs](shellSpec, func(ctx context.Context, a shellArgs) (Result, error) {
+func shell(_ *tool.Policy, dir string) tool.Tool {
+	return tool.WithBudget(
+		tool.WithGuard(
+			tool.Func[shellArgs](shellSpec, func(ctx context.Context, a shellArgs) (tool.Result, error) {
 				if a.Command == "" {
-					return Result{}, errors.New("command must not be empty")
+					return tool.Result{}, errors.New("command must not be empty")
 				}
 				return runShell(ctx, dir, a.Command)
 			}),
-			func(a shellArgs) (Request, error) {
-				return Request{Tool: "shell", Access: AccessShell, Target: a.Command}, nil
+			func(a shellArgs) (tool.Request, error) {
+				return tool.Request{Tool: "shell", Access: tool.AccessShell, Target: a.Command}, nil
 			},
 		),
 		shellDeadline,
@@ -67,15 +68,15 @@ func shell(_ *Policy, dir string) Tool {
 
 // shellDeadline honours the optional timeout argument. Zero means the runner's
 // own ceiling applies.
-func shellDeadline(c Call) time.Duration {
-	args, err := decodeArgs[shellArgs](c)
+func shellDeadline(c tool.Call) time.Duration {
+	args, err := tool.DecodeArgs[shellArgs](c)
 	if err != nil || args.Timeout <= 0 {
 		return 0
 	}
 	return time.Duration(args.Timeout) * time.Second
 }
 
-func runShell(ctx context.Context, dir, command string) (Result, error) {
+func runShell(ctx context.Context, dir, command string) (tool.Result, error) {
 	cmd := shellCommand(ctx, command)
 	cmd.Dir = dir
 	isolateShell(cmd)
@@ -98,16 +99,16 @@ func runShell(ctx context.Context, dir, command string) (Result, error) {
 		// Return what ran as a result, not an error: the registry discards the
 		// output attached to an error, and the runner is the one that knows why
 		// the call stopped.
-		return Result{Output: text, IsError: true}, nil
+		return tool.Result{Output: text, IsError: true}, nil
 	case err == nil:
-		return Result{Output: text}, nil
+		return tool.Result{Output: text}, nil
 	case errors.Is(err, exec.ErrWaitDelay):
-		return Result{
+		return tool.Result{
 			Output:  joinStatus(text, "(output handles stayed open after exit; stopped waiting for them)"),
 			IsError: true,
 		}, nil
 	default:
-		return Result{Output: joinStatus(text, err.Error()), IsError: true}, nil
+		return tool.Result{Output: joinStatus(text, err.Error()), IsError: true}, nil
 	}
 }
 

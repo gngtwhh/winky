@@ -1,23 +1,25 @@
-package tool
+package defaulttool
+
+import "winky/internal/tool"
 
 // NewDefault builds the standard tool set: filesystem tools rooted at root, web
 // search/fetch, and shell, all governed by p.
-func NewDefault(root string, p *Policy) (*Registry, error) {
+func NewDefault(root string, p *tool.Policy) (*tool.Registry, error) {
 	if p == nil {
-		p = NewPolicy(WorkspaceWrite)
+		p = tool.NewPolicy(tool.WorkspaceWrite)
 	}
 	fs, err := NewFS(root)
 	if err != nil {
 		return nil, err
 	}
 
-	reg := NewRegistry().SetPolicy(p)
+	reg := tool.NewRegistry().SetPolicy(p)
 	for _, t := range fs.Tools() {
 		if err := reg.Register(t); err != nil {
 			return nil, err
 		}
 	}
-	for _, t := range []Tool{webSearch(p), webFetch(p), shell(p, fs.Root)} {
+	for _, t := range []tool.Tool{webSearch(p), webFetch(p), shell(p, fs.Root)} {
 		if err := reg.Register(t); err != nil {
 			return nil, err
 		}

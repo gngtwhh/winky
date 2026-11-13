@@ -13,6 +13,7 @@ import (
 	"winky/internal/llm/model"
 	"winky/internal/session"
 	"winky/internal/tool"
+	defaulttool "winky/internal/tool/default_tool"
 	"winky/internal/transcript/jsonl"
 	"winky/internal/tui"
 )
@@ -49,7 +50,7 @@ func runTUI(ctx context.Context, opts *options) error {
 	}
 
 	policy := tool.NewPolicy(tool.WorkspaceWrite)
-	reg, err := tool.NewDefault(cfg.Cwd, policy)
+	reg, err := defaulttool.NewDefault(cfg.Cwd, policy)
 	if err != nil {
 		return fmt.Errorf("create tools: %w", err)
 	}

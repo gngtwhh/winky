@@ -266,3 +266,15 @@ func equalStrings(a, b []string) bool {
 	}
 	return true
 }
+
+// Schema helpers for fake tools; the production builders live in default_tool.
+func object(props map[string]any) map[string]any {
+	if props == nil {
+		props = map[string]any{}
+	}
+	return map[string]any{"type": "object", "properties": props}
+}
+
+func stringProp(desc string) map[string]any {
+	return map[string]any{"type": "string", "description": desc}
+}

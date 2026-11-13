@@ -266,7 +266,8 @@ internal/cli/               cobra command, startup flags, and agent wiring
 internal/agent/             agent loop, view projection, compaction, and the tool-call supervisor
 internal/llm/               request/response types and OpenAI Responses client
 internal/llm/api/           provider adapters
-internal/tool/              filesystem, shell, web tools and permission policy
+internal/tool/              tool interface, registry, and permission policy
+internal/tool/default_tool/ built-in filesystem, shell, and web tools
 internal/tui/               Bubble Tea UI
 internal/prompt/            system prompt state, its rendering, and the built-in default
 internal/schema/            shared UI events and Turn types

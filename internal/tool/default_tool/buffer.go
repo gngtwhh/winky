@@ -1,4 +1,4 @@
-package tool
+package defaulttool
 
 // tailBuffer keeps the last max bytes written to it and counts everything it
 // dropped. Tool output becomes conversation state, so a command that prints

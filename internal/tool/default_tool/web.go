@@ -1,4 +1,4 @@
-package tool
+package defaulttool
 
 import (
 	"context"
@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"winky/internal/llm"
+	"winky/internal/tool"
 )
 
 const (
@@ -60,15 +61,15 @@ type webSearchArgs struct {
 	Query string `json:"query"`
 }
 
-func webSearch(_ *Policy) Tool {
-	return budgeted(guarded(Func[webSearchArgs](webSearchSpec, func(ctx context.Context, a webSearchArgs) (Result, error) {
+func webSearch(_ *tool.Policy) tool.Tool {
+	return tool.WithBudget(tool.WithGuard(tool.Func[webSearchArgs](webSearchSpec, func(ctx context.Context, a webSearchArgs) (tool.Result, error) {
 		out, err := duckSearch(ctx, a.Query)
 		if err != nil {
-			return Result{}, err
+			return tool.Result{}, err
 		}
-		return Result{Output: out}, nil
-	}), func(a webSearchArgs) (Request, error) {
-		return Request{Tool: "web_search", Access: AccessNetwork, Target: a.Query}, nil
+		return tool.Result{Output: out}, nil
+	}), func(a webSearchArgs) (tool.Request, error) {
+		return tool.Request{Tool: "web_search", Access: tool.AccessNetwork, Target: a.Query}, nil
 	}), webDeadline)
 }
 
@@ -76,20 +77,20 @@ type webFetchArgs struct {
 	URL string `json:"url"`
 }
 
-func webFetch(_ *Policy) Tool {
-	return budgeted(guarded(Func[webFetchArgs](webFetchSpec, func(ctx context.Context, a webFetchArgs) (Result, error) {
+func webFetch(_ *tool.Policy) tool.Tool {
+	return tool.WithBudget(tool.WithGuard(tool.Func[webFetchArgs](webFetchSpec, func(ctx context.Context, a webFetchArgs) (tool.Result, error) {
 		out, err := fetchText(ctx, a.URL)
 		if err != nil {
-			return Result{}, err
+			return tool.Result{}, err
 		}
-		return Result{Output: out}, nil
-	}), func(a webFetchArgs) (Request, error) {
-		return Request{Tool: "web_fetch", Access: AccessNetwork, Target: a.URL}, nil
+		return tool.Result{Output: out}, nil
+	}), func(a webFetchArgs) (tool.Request, error) {
+		return tool.Request{Tool: "web_fetch", Access: tool.AccessNetwork, Target: a.URL}, nil
 	}), webDeadline)
 }
 
 // webDeadline is fixed: a page that needs longer than this is not worth a turn.
-func webDeadline(Call) time.Duration { return webTimeout }
+func webDeadline(tool.Call) time.Duration { return webTimeout }
 
 // duckSearch scrapes DuckDuckGo's HTML endpoint. It is a minimal fallback: no API
 // key, and good enough to return titles, URLs and snippets.

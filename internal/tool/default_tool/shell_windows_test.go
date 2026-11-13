@@ -1,11 +1,13 @@
 //go:build windows
 
-package tool
+package defaulttool
 
 import (
 	"strings"
 	"testing"
 	"unicode/utf8"
+
+	"winky/internal/tool"
 )
 
 // Console output arrives in the console code page, not UTF-8. Left alone, those
@@ -35,7 +37,7 @@ func TestDecodeOutputConvertsConsoleCodePage(t *testing.T) {
 // quotes in the argument, so `powershell -Command "(Get-Date)"` printed the
 // command instead of running it.
 func TestShellKeepsQuotesIntact(t *testing.T) {
-	sh := shell(NewPolicy(FullAccess), t.TempDir())
+	sh := shell(tool.NewPolicy(tool.FullAccess), t.TempDir())
 
 	tests := []struct {
 		command string
@@ -47,7 +49,7 @@ func TestShellKeepsQuotesIntact(t *testing.T) {
 		{`for %A in ("x" "y") do @echo [%~A]`, "[x]\r\n[y]"},
 	}
 	for _, tc := range tests {
-		res, err := sh.Invoke(t.Context(), Call{
+		res, err := sh.Invoke(t.Context(), tool.Call{
 			Name:      "shell",
 			Arguments: `{"command":` + quoteJSON(tc.command) + `}`,
 		})
@@ -79,9 +81,9 @@ func quoteJSON(s string) string {
 // UTF-8: the TUI measures it, and the transcript encoder would replace invalid
 // bytes with U+FFFD and lose them.
 func TestShellOutputIsValidUTF8(t *testing.T) {
-	sh := shell(NewPolicy(FullAccess), t.TempDir())
+	sh := shell(tool.NewPolicy(tool.FullAccess), t.TempDir())
 
-	res, err := sh.Invoke(t.Context(), Call{
+	res, err := sh.Invoke(t.Context(), tool.Call{
 		Name: "shell", Arguments: `{"command":"echo %DATE% \u0026 date"}`,
 	})
 	if err != nil {

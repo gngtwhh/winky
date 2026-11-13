@@ -1,4 +1,4 @@
-package tool
+package defaulttool
 
 // JSON Schema builders for tool parameters. They keep the spec literals in fs.go
 // readable and emit the subset every provider understands: an object with

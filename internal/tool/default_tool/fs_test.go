@@ -1,4 +1,4 @@
-package tool
+package defaulttool
 
 import (
 	"context"
@@ -7,6 +7,8 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"winky/internal/tool"
 )
 
 func testFS(t *testing.T) *FS {
@@ -28,9 +30,9 @@ func writeFile(t *testing.T, path, content string) {
 	}
 }
 
-func run(t *testing.T, tl Tool, args string) Result {
+func run(t *testing.T, tl tool.Tool, args string) tool.Result {
 	t.Helper()
-	res, err := tl.Invoke(context.Background(), Call{Name: tl.Spec().Name, Arguments: args})
+	res, err := tl.Invoke(context.Background(), tool.Call{Name: tl.Spec().Name, Arguments: args})
 	if err != nil {
 		t.Fatalf("%s(%s): %v", tl.Spec().Name, args, err)
 	}
@@ -64,17 +66,17 @@ func TestFileCRUD(t *testing.T) {
 // tool's Invoke no longer asks, and a refused call never starts.
 func TestPermissionDenies(t *testing.T) {
 	// Read-only denies writes and allows reads.
-	readOnly, err := NewDefault(t.TempDir(), NewPolicy(ReadOnly))
+	readOnly, err := NewDefault(t.TempDir(), tool.NewPolicy(tool.ReadOnly))
 	if err != nil {
 		t.Fatalf("NewDefault: %v", err)
 	}
-	write := Call{Name: "write_file", Arguments: `{"path":"a.txt","content":"x"}`}
+	write := tool.Call{Name: "write_file", Arguments: `{"path":"a.txt","content":"x"}`}
 	if err := readOnly.Allow(context.Background(), write); err == nil {
 		t.Fatal("read-only mode allowed a write")
-	} else if _, ok := err.(*DeniedError); !ok {
+	} else if _, ok := err.(*tool.DeniedError); !ok {
 		t.Fatalf("read-only write error = %v, want DeniedError", err)
 	}
-	if err := readOnly.Allow(context.Background(), Call{
+	if err := readOnly.Allow(context.Background(), tool.Call{
 		Name: "read_file", Arguments: `{"path":"a.txt"}`,
 	}); err != nil {
 		t.Fatalf("read-only mode denied a read: %v", err)
@@ -85,19 +87,19 @@ func TestPermissionDenies(t *testing.T) {
 	args := fmt.Sprintf(`{"path":%q}`, outside)
 
 	// Workspace-write denies reading outside the workspace.
-	workspace, err := NewDefault(t.TempDir(), NewPolicy(WorkspaceWrite))
+	workspace, err := NewDefault(t.TempDir(), tool.NewPolicy(tool.WorkspaceWrite))
 	if err != nil {
 		t.Fatalf("NewDefault: %v", err)
 	}
-	readOutside := Call{Name: "read_file", Arguments: args}
+	readOutside := tool.Call{Name: "read_file", Arguments: args}
 	if err := workspace.Allow(context.Background(), readOutside); err == nil {
 		t.Fatal("workspace mode allowed a read outside the workspace")
-	} else if _, ok := err.(*DeniedError); !ok {
+	} else if _, ok := err.(*tool.DeniedError); !ok {
 		t.Fatalf("outside read error = %v, want DeniedError", err)
 	}
 
 	// Full access allows it.
-	full, err := NewDefault(t.TempDir(), NewPolicy(FullAccess))
+	full, err := NewDefault(t.TempDir(), tool.NewPolicy(tool.FullAccess))
 	if err != nil {
 		t.Fatalf("NewDefault: %v", err)
 	}

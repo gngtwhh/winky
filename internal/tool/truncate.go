@@ -29,7 +29,7 @@ func Truncate(s string, max int) string {
 	budget := max - markerLen
 	if budget <= 0 {
 		// Pathologically small limit: a bare head cut is the only option.
-		return cutAtRune(s, max)
+		return CutAtRune(s, max)
 	}
 
 	head := budget * 2 / 3
@@ -44,9 +44,9 @@ func Truncate(s string, max int) string {
 	return s[:headEnd] + fmt.Sprintf("\n... [%d bytes elided] ...\n", elided) + s[tailStart:]
 }
 
-// cutAtRune returns the longest prefix of s that fits in max bytes without
+// CutAtRune returns the longest prefix of s that fits in max bytes without
 // splitting a rune.
-func cutAtRune(s string, max int) string {
+func CutAtRune(s string, max int) string {
 	if max <= 0 {
 		return ""
 	}

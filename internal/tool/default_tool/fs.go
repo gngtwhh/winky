@@ -1,4 +1,4 @@
-package tool
+package defaulttool
 
 import (
 	"bytes"
@@ -11,6 +11,7 @@ import (
 	"strings"
 
 	"winky/internal/llm"
+	"winky/internal/tool"
 )
 
 // Limits for the filesystem tools; tool output is re-sent to the model every
@@ -60,13 +61,13 @@ func NewFS(root string) (*FS, error) {
 
 // Tools returns the filesystem tools. Mutating tools are sequenced so two
 // concurrent edits to the same path cannot race.
-func (fs *FS) Tools() []Tool {
-	return []Tool{
+func (fs *FS) Tools() []tool.Tool {
+	return []tool.Tool{
 		fs.readFile(),
 		fs.listDir(),
-		sequenced(fs.writeFile()),
-		sequenced(fs.editFile()),
-		sequenced(fs.delete()),
+		tool.WithSequential(fs.writeFile()),
+		tool.WithSequential(fs.editFile()),
+		tool.WithSequential(fs.delete()),
 		fs.mkdir(),
 	}
 }
@@ -74,12 +75,12 @@ func (fs *FS) Tools() []Tool {
 // request names the permission one operation needs. Resolving the path here
 // duplicates the resolution Invoke does, which is the price of asking before the
 // call starts instead of after it has begun.
-func (fs *FS) request(name string, a Access, p string) (Request, error) {
+func (fs *FS) request(name string, a tool.Access, p string) (tool.Request, error) {
 	path, inside, err := fs.resolve(p)
 	if err != nil {
-		return Request{}, err
+		return tool.Request{}, err
 	}
-	return Request{Tool: name, Access: a, Target: fs.display(path), Inside: inside}, nil
+	return tool.Request{Tool: name, Access: a, Target: fs.display(path), Inside: inside}, nil
 }
 
 // resolve maps a path argument to an absolute path. inside reports whether the
@@ -236,38 +237,38 @@ type readFileArgs struct {
 	Limit  int    `json:"limit"`
 }
 
-func (fs *FS) readFile() Tool {
-	return guarded(Func[readFileArgs](readFileSpec, func(ctx context.Context, a readFileArgs) (Result, error) {
+func (fs *FS) readFile() tool.Tool {
+	return tool.WithGuard(tool.Func[readFileArgs](readFileSpec, func(ctx context.Context, a readFileArgs) (tool.Result, error) {
 		if err := ctx.Err(); err != nil {
-			return Result{}, err
+			return tool.Result{}, err
 		}
 		path, _, err := fs.resolve(a.Path)
 		if err != nil {
-			return Result{}, err
+			return tool.Result{}, err
 		}
 
 		if err := fs.checkTextFile(path, maxReadBytes); err != nil {
-			return Result{}, err
+			return tool.Result{}, err
 		}
 		info, err := os.Stat(path)
 		if err != nil {
-			return Result{}, err
+			return tool.Result{}, err
 		}
 		if info.IsDir() {
-			return Result{}, fmt.Errorf("%s is a directory; use list_dir", fs.display(path))
+			return tool.Result{}, fmt.Errorf("%s is a directory; use list_dir", fs.display(path))
 		}
 
 		data, err := os.ReadFile(path)
 		if err != nil {
-			return Result{}, err
+			return tool.Result{}, err
 		}
 		if isBinary(data) {
-			return Result{}, fmt.Errorf("%s looks binary; refusing to read it as text", fs.display(path))
+			return tool.Result{}, fmt.Errorf("%s looks binary; refusing to read it as text", fs.display(path))
 		}
 
 		lines := splitLines(string(data))
 		if len(lines) == 0 {
-			return Result{Output: fmt.Sprintf("%s: empty file", fs.display(path))}, nil
+			return tool.Result{Output: fmt.Sprintf("%s: empty file", fs.display(path))}, nil
 		}
 
 		offset := max(a.Offset, 1)
@@ -280,7 +281,7 @@ func (fs *FS) readFile() Tool {
 		start := min(offset-1, len(lines))
 		end := min(start+limit, len(lines))
 		if start == end {
-			return Result{Output: fmt.Sprintf(
+			return tool.Result{Output: fmt.Sprintf(
 				"%s: no lines in range (file has %d lines)", fs.display(path), len(lines),
 			)}, nil
 		}
@@ -293,9 +294,9 @@ func (fs *FS) readFile() Tool {
 		if end < len(lines) {
 			fmt.Fprintf(&b, "[%d more lines; continue with offset=%d]\n", len(lines)-end, end+1)
 		}
-		return Result{Output: b.String()}, nil
-	}), func(a readFileArgs) (Request, error) {
-		return fs.request("read_file", AccessRead, a.Path)
+		return tool.Result{Output: b.String()}, nil
+	}), func(a readFileArgs) (tool.Request, error) {
+		return fs.request("read_file", tool.AccessRead, a.Path)
 	})
 }
 
@@ -304,28 +305,28 @@ type writeFileArgs struct {
 	Content string `json:"content"`
 }
 
-func (fs *FS) writeFile() Tool {
-	return guarded(Func[writeFileArgs](writeFileSpec, func(ctx context.Context, a writeFileArgs) (Result, error) {
+func (fs *FS) writeFile() tool.Tool {
+	return tool.WithGuard(tool.Func[writeFileArgs](writeFileSpec, func(ctx context.Context, a writeFileArgs) (tool.Result, error) {
 		if err := ctx.Err(); err != nil {
-			return Result{}, err
+			return tool.Result{}, err
 		}
 		path, _, err := fs.resolve(a.Path)
 		if err != nil {
-			return Result{}, err
+			return tool.Result{}, err
 		}
 
 		if info, err := os.Stat(path); err == nil && info.IsDir() {
-			return Result{}, fmt.Errorf("%s is a directory", fs.display(path))
+			return tool.Result{}, fmt.Errorf("%s is a directory", fs.display(path))
 		}
 		if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
-			return Result{}, err
+			return tool.Result{}, err
 		}
 		if err := writeFileAtomic(path, []byte(a.Content)); err != nil {
-			return Result{}, err
+			return tool.Result{}, err
 		}
-		return Result{Output: fmt.Sprintf("wrote %d bytes to %s", len(a.Content), fs.display(path))}, nil
-	}), func(a writeFileArgs) (Request, error) {
-		return fs.request("write_file", AccessWrite, a.Path)
+		return tool.Result{Output: fmt.Sprintf("wrote %d bytes to %s", len(a.Content), fs.display(path))}, nil
+	}), func(a writeFileArgs) (tool.Request, error) {
+		return fs.request("write_file", tool.AccessWrite, a.Path)
 	})
 }
 
@@ -336,43 +337,43 @@ type editFileArgs struct {
 	ReplaceAll bool   `json:"replace_all"`
 }
 
-func (fs *FS) editFile() Tool {
-	return guarded(Func[editFileArgs](editFileSpec, func(ctx context.Context, a editFileArgs) (Result, error) {
+func (fs *FS) editFile() tool.Tool {
+	return tool.WithGuard(tool.Func[editFileArgs](editFileSpec, func(ctx context.Context, a editFileArgs) (tool.Result, error) {
 		if err := ctx.Err(); err != nil {
-			return Result{}, err
+			return tool.Result{}, err
 		}
 		if a.OldString == "" {
-			return Result{}, errors.New("old_string must not be empty")
+			return tool.Result{}, errors.New("old_string must not be empty")
 		}
 		if a.OldString == a.NewString {
-			return Result{}, errors.New("old_string and new_string are identical")
+			return tool.Result{}, errors.New("old_string and new_string are identical")
 		}
 		path, _, err := fs.resolve(a.Path)
 		if err != nil {
-			return Result{}, err
+			return tool.Result{}, err
 		}
 
 		if err := fs.checkTextFile(path, maxReadBytes); err != nil {
-			return Result{}, err
+			return tool.Result{}, err
 		}
 		data, err := os.ReadFile(path)
 		if err != nil {
-			return Result{}, err
+			return tool.Result{}, err
 		}
 		if isBinary(data) {
-			return Result{}, fmt.Errorf("%s looks binary; refusing to edit it as text", fs.display(path))
+			return tool.Result{}, fmt.Errorf("%s looks binary; refusing to edit it as text", fs.display(path))
 		}
 
 		content := string(data)
 		count := strings.Count(content, a.OldString)
 		switch {
 		case count == 0:
-			return Result{
+			return tool.Result{
 				Output:  fmt.Sprintf("no match for old_string in %s", fs.display(path)),
 				IsError: true,
 			}, nil
 		case count > 1 && !a.ReplaceAll:
-			return Result{
+			return tool.Result{
 				Output: fmt.Sprintf(
 					"old_string matches %d times in %s (first matches on lines %s); "+
 						"add more surrounding context or set replace_all",
@@ -387,16 +388,16 @@ func (fs *FS) editFile() Tool {
 			updated = strings.ReplaceAll(content, a.OldString, a.NewString)
 		}
 		if err := writeFileAtomic(path, []byte(updated)); err != nil {
-			return Result{}, err
+			return tool.Result{}, err
 		}
 
 		replaced := 1
 		if a.ReplaceAll {
 			replaced = count
 		}
-		return Result{Output: fmt.Sprintf("replaced %d occurrence(s) in %s", replaced, fs.display(path))}, nil
-	}), func(a editFileArgs) (Request, error) {
-		return fs.request("edit_file", AccessWrite, a.Path)
+		return tool.Result{Output: fmt.Sprintf("replaced %d occurrence(s) in %s", replaced, fs.display(path))}, nil
+	}), func(a editFileArgs) (tool.Request, error) {
+		return fs.request("edit_file", tool.AccessWrite, a.Path)
 	})
 }
 
@@ -405,10 +406,10 @@ type listDirArgs struct {
 	Limit int    `json:"limit"`
 }
 
-func (fs *FS) listDir() Tool {
-	return guarded(Func[listDirArgs](listDirSpec, func(ctx context.Context, a listDirArgs) (Result, error) {
+func (fs *FS) listDir() tool.Tool {
+	return tool.WithGuard(tool.Func[listDirArgs](listDirSpec, func(ctx context.Context, a listDirArgs) (tool.Result, error) {
 		if err := ctx.Err(); err != nil {
-			return Result{}, err
+			return tool.Result{}, err
 		}
 		arg := strings.TrimSpace(a.Path)
 		if arg == "" {
@@ -416,20 +417,20 @@ func (fs *FS) listDir() Tool {
 		}
 		path, _, err := fs.resolve(arg)
 		if err != nil {
-			return Result{}, err
+			return tool.Result{}, err
 		}
 
 		info, err := os.Stat(path)
 		if err != nil {
-			return Result{}, err
+			return tool.Result{}, err
 		}
 		if !info.IsDir() {
-			return Result{}, fmt.Errorf("%s is not a directory", fs.display(path))
+			return tool.Result{}, fmt.Errorf("%s is not a directory", fs.display(path))
 		}
 
 		entries, err := os.ReadDir(path)
 		if err != nil {
-			return Result{}, err
+			return tool.Result{}, err
 		}
 		sortEntries(entries)
 
@@ -463,9 +464,9 @@ func (fs *FS) listDir() Tool {
 				fmt.Fprintf(&b, "f  %s%s\n", e.Name(), size)
 			}
 		}
-		return Result{Output: b.String()}, nil
-	}), func(a listDirArgs) (Request, error) {
-		return fs.request("list_dir", AccessRead, a.Path)
+		return tool.Result{Output: b.String()}, nil
+	}), func(a listDirArgs) (tool.Request, error) {
+		return fs.request("list_dir", tool.AccessRead, a.Path)
 	})
 }
 
@@ -474,19 +475,19 @@ type deleteArgs struct {
 	Recursive bool   `json:"recursive"`
 }
 
-func (fs *FS) delete() Tool {
-	return guarded(Func[deleteArgs](deleteSpec, func(ctx context.Context, a deleteArgs) (Result, error) {
+func (fs *FS) delete() tool.Tool {
+	return tool.WithGuard(tool.Func[deleteArgs](deleteSpec, func(ctx context.Context, a deleteArgs) (tool.Result, error) {
 		if err := ctx.Err(); err != nil {
-			return Result{}, err
+			return tool.Result{}, err
 		}
 		path, _, err := fs.resolve(a.Path)
 		if err != nil {
-			return Result{}, err
+			return tool.Result{}, err
 		}
 
 		info, err := os.Lstat(path)
 		if err != nil {
-			return Result{}, err
+			return tool.Result{}, err
 		}
 		if info.IsDir() && a.Recursive {
 			err = os.RemoveAll(path)
@@ -494,11 +495,11 @@ func (fs *FS) delete() Tool {
 			err = os.Remove(path)
 		}
 		if err != nil {
-			return Result{}, err
+			return tool.Result{}, err
 		}
-		return Result{Output: "deleted " + fs.display(path)}, nil
-	}), func(a deleteArgs) (Request, error) {
-		return fs.request("delete", AccessWrite, a.Path)
+		return tool.Result{Output: "deleted " + fs.display(path)}, nil
+	}), func(a deleteArgs) (tool.Request, error) {
+		return fs.request("delete", tool.AccessWrite, a.Path)
 	})
 }
 
@@ -506,21 +507,21 @@ type mkdirArgs struct {
 	Path string `json:"path"`
 }
 
-func (fs *FS) mkdir() Tool {
-	return guarded(Func[mkdirArgs](mkdirSpec, func(ctx context.Context, a mkdirArgs) (Result, error) {
+func (fs *FS) mkdir() tool.Tool {
+	return tool.WithGuard(tool.Func[mkdirArgs](mkdirSpec, func(ctx context.Context, a mkdirArgs) (tool.Result, error) {
 		if err := ctx.Err(); err != nil {
-			return Result{}, err
+			return tool.Result{}, err
 		}
 		path, _, err := fs.resolve(a.Path)
 		if err != nil {
-			return Result{}, err
+			return tool.Result{}, err
 		}
 		if err := os.MkdirAll(path, 0o755); err != nil {
-			return Result{}, err
+			return tool.Result{}, err
 		}
-		return Result{Output: "created directory " + fs.display(path)}, nil
-	}), func(a mkdirArgs) (Request, error) {
-		return fs.request("mkdir", AccessWrite, a.Path)
+		return tool.Result{Output: "created directory " + fs.display(path)}, nil
+	}), func(a mkdirArgs) (tool.Request, error) {
+		return fs.request("mkdir", tool.AccessWrite, a.Path)
 	})
 }
 
@@ -593,7 +594,7 @@ func clipLine(s string) string {
 	if len(s) <= maxLineBytes {
 		return s
 	}
-	return cutAtRune(s, maxLineBytes) + "…"
+	return tool.CutAtRune(s, maxLineBytes) + "…"
 }
 
 // checkTextFile rejects anything that is not a regular file within the size
